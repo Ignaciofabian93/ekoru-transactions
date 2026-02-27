@@ -1,0 +1,65 @@
+# Dependencies
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Tests
+test/
+coverage/
+*.spec.ts
+*.test.ts
+.jest/
+
+# Environment files (will be provided via env_file in compose)
+.env
+.env.*
+!.env.example
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation
+*.md
+README.md
+CHANGELOG.md
+LICENSE
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+.circleci/
+
+# Docker
+Dockerfile
+.dockerignore
+compose*.yml
+docker-compose*.yml
+
+# Misc
+.prettierrc
+.prettierignore
+.eslintrc*
+eslint.config.mjs
+.editorconfig
+.nvmrc
+.npmrc
+
+# Logs
+logs/
+*.log
