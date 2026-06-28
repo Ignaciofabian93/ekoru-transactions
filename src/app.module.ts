@@ -65,7 +65,12 @@ import { PrometheusModule } from '@willsoto/nestjs-prometheus';
         req,
         res,
         sellerId: req.headers['x-seller-id'] as string,
+        adminId: req.headers['x-admin-id'] as string,
         token: req.headers.authorization?.replace('Bearer ', '') as string,
+        // Set by the gateway's AuthenticatedDataSource. The internal
+        // `processProviderReturn` / `processProviderWebhook` mutations use
+        // this to verify the call comes from the gateway.
+        internalSecret: req.headers['x-internal-secret'] as string | undefined,
       }),
       formatError: (error) => {
         if (process.env.NODE_ENV === 'production') {

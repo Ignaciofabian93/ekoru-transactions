@@ -2,6 +2,7 @@ import { Resolver, Query, Mutation, Args, Int, ID } from '@nestjs/graphql';
 import { OrdersService } from './orders.service.js';
 import { Order, OrderConnection } from './entities/index.js';
 import { CreateOrderInput, UpdateShippingInput } from './dto/index.js';
+import { CurrentSeller } from '../common/decorators/index.js';
 
 @Resolver(() => Order)
 export class OrdersResolver {
@@ -18,12 +19,34 @@ export class OrdersResolver {
     @Args('page', { type: () => Int, defaultValue: 1 }) page: number,
     @Args('pageSize', { type: () => Int, defaultValue: 10 }) pageSize: number,
   ) {
-    return this.ordersService.getOrdersBySeller(sellerId, page, pageSize);
+    return this.ordersService.getOrdersBySeller({ sellerId, page, pageSize });
   }
 
+  /**
+   * Buyer-side order history. The authenticated seller is the buyer here.
+   * The frontend confirmation screen links the buyer's "View my orders"
+   * button to a page that calls this.
+   */
+  @Query(() => OrderConnection, { name: 'getOrdersByBuyer' })
+  async getOrdersByBuyer(
+    @CurrentSeller() buyerId: string,
+    @Args('page', { type: () => Int, defaultValue: 1 }) page: number,
+    @Args('pageSize', { type: () => Int, defaultValue: 10 }) pageSize: number,
+  ) {
+    return this.ordersService.getOrdersByBuyer({ buyerId, page, pageSize });
+  }
+
+  /**
+   * Creates a PENDING_PAYMENT order with server-computed totals. Anyone
+   * trying to pass a sellerId or per-item price is ignored — buyerId comes
+   * from the JWT, sellerId + price come from the marketplace subgraph.
+   */
   @Mutation(() => Order)
-  async createOrder(@Args('input') input: CreateOrderInput) {
-    return this.ordersService.createOrder(input);
+  async createOrder(
+    @Args('input') input: CreateOrderInput,
+    @CurrentSeller() buyerId: string,
+  ) {
+    return this.ordersService.createOrder({ input, buyerId });
   }
 
   @Mutation(() => Order)

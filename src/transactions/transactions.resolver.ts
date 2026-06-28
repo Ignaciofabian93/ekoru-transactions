@@ -31,12 +31,12 @@ export class TransactionsResolver {
     @Args('kind', { type: () => TransactionKind, nullable: true })
     kind?: TransactionKind,
   ) {
-    return this.transactionsService.getTransactionsBySeller(
+    return this.transactionsService.getTransactionsBySeller({
       sellerId,
       page,
       pageSize,
       kind,
-    );
+    });
   }
 
   @Query(() => [TransactionFee], { name: 'getTransactionFees' })
@@ -59,9 +59,9 @@ export class TransactionsResolver {
     @Args('id', { type: () => ID }) id: string,
     @Args('status', { type: () => ExchangeStatus }) status: ExchangeStatus,
   ) {
-    return this.transactionsService.updateExchangeStatus(
-      parseInt(id, 10),
+    return this.transactionsService.updateExchangeStatus({
+      id: parseInt(id, 10),
       status,
-    );
+    });
   }
 }

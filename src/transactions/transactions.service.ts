@@ -63,12 +63,17 @@ export class TransactionsService {
     }
   }
 
-  async getTransactionsBySeller(
-    sellerId: string,
-    page: number,
-    pageSize: number,
-    kind?: TransactionKind,
-  ) {
+  async getTransactionsBySeller({
+    sellerId,
+    page,
+    pageSize,
+    kind,
+  }: {
+    sellerId: string;
+    page: number;
+    pageSize: number;
+    kind?: TransactionKind;
+  }) {
     try {
       const { skip, take } = calculatePrismaParams(page, pageSize);
       const where = { sellerId, ...(kind && { kind }) };
@@ -166,7 +171,13 @@ export class TransactionsService {
     }
   }
 
-  async updateExchangeStatus(id: number, status: ExchangeStatus) {
+  async updateExchangeStatus({
+    id,
+    status,
+  }: {
+    id: number;
+    status: ExchangeStatus;
+  }) {
     try {
       const exchange = await this.prisma.exchange.update({
         where: { id },

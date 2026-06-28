@@ -45,6 +45,7 @@ enum ExchangeStatus {
 enum ChileanPaymentProvider {
   KHIPU
   WEBPAY
+  MERCADOPAGO
 }
 
 enum PaymentStatus {
@@ -61,6 +62,7 @@ enum PaymentStatus {
 enum PaymentType {
   ORDER
   QUOTATION
+  MEMBERSHIP
 }
 
 enum RefundStatus {
@@ -74,6 +76,20 @@ enum RefundStatus {
 enum PaymentEnvironment {
   SANDBOX
   PRODUCTION
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  CANCELED
+  REFUNDED
+}
+
+enum ShippingMethod {
+  DELIVERED_TO_HOME
+  IN_HOUSE_PICKUP
+  IN_MID_POINT_PICKUP
+  CARRIER
 }
 
 enum ShippingStage {
@@ -249,18 +265,30 @@ model PaymentWebhook {
 }
 
 model Order {
-  id               Int            @id @default(autoincrement())
-  sellerId         String
-  createdAt        DateTime       @default(now())
-  shippingStatusId Int
-  updatedAt        DateTime       @updatedAt
-  version          Int            @default(0)
-  shippingStatus   ShippingStatus @relation(fields: [shippingStatusId], references: [id])
-  orderItem        OrderItem[]
-  payment          Payment[]
+  id                          Int              @id @default(autoincrement())
+  buyerId                     String
+  sellerId                    String
+  status                      OrderStatus      @default(PENDING_PAYMENT)
+  subtotal                    Int              @default(0)
+  shippingCost                Int              @default(0)
+  taxAmount                   Int              @default(0)
+  total                       Int              @default(0)
+  currency                    String           @default("CLP")
+  shippingMethod              ShippingMethod   @default(DELIVERED_TO_HOME)
+  shippingAddressId           Int?
+  shippingStatusId            Int
+  version                     Int              @default(0)
+  createdAt                   DateTime         @default(now())
+  updatedAt                   DateTime         @updatedAt
+  shippingStatus              ShippingStatus   @relation(fields: [shippingStatusId], references: [id])
+  orderItem                   OrderItem[]
+  payment                     Payment[]
 
+  @@index([buyerId])
   @@index([sellerId])
   @@index([shippingStatusId])
+  @@index([shippingAddressId])
+  @@index([status])
   @@index([createdAt(sort: Desc)])
 }
 

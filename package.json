@@ -22,7 +22,14 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "prisma:gen": "prisma generate"
+    "prisma:gen": "prisma generate",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "src/**/*.ts": [
+      "prettier --write",
+      "eslint --fix"
+    ]
   },
   "dependencies": {
     "@apollo/server": "^5.2.0",
@@ -76,6 +83,8 @@
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.7.3",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
     "typescript-eslint": "^8.20.0"
   },
   "jest": {

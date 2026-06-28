@@ -1,63 +1,28 @@
-import { InputType, Field, Int, Float } from '@nestjs/graphql';
-import {
-  IsEnum,
-  IsNumber,
-  IsOptional,
-  IsPositive,
-  IsString,
-  Min,
-} from 'class-validator';
-import {
-  ChileanPaymentProvider,
-  PaymentType,
-} from '../../graphql/enums/index.js';
+import { InputType, Field, Int } from '@nestjs/graphql';
+import { IsEnum, IsInt, IsString, IsUrl } from 'class-validator';
+import { ChileanPaymentProvider } from '../../graphql/enums/index.js';
 
+/**
+ * Minimal input the buyer can supply. Everything else (amount, currency,
+ * payerId, receiverId, chileanConfigId) is resolved server-side from the
+ * order + authenticated session.
+ */
 @InputType()
 export class CreatePaymentInput {
-  @Field(() => Int, { nullable: true })
-  @IsOptional()
-  @IsNumber()
-  orderId?: number;
-
-  @Field(() => Int, { nullable: true })
-  @IsOptional()
-  @IsNumber()
-  quotationId?: number;
-
-  @Field(() => Float)
-  @IsNumber()
-  @IsPositive()
-  amount: number;
-
-  /** Default CLP – Chilean peso */
-  @Field(() => String, { defaultValue: 'CLP' })
-  @IsOptional()
-  @IsString()
-  currency: string = 'CLP';
+  @Field(() => Int)
+  @IsInt()
+  orderId: number;
 
   @Field(() => ChileanPaymentProvider)
   @IsEnum(ChileanPaymentProvider)
-  paymentProvider: ChileanPaymentProvider;
+  provider: ChileanPaymentProvider;
 
-  @Field(() => String, { nullable: true })
-  @IsOptional()
-  @IsString()
-  description?: string;
-
+  /**
+   * Absolute URL the provider should send the buyer back to. The gateway's
+   * `/payments/return/:provider` endpoint typically lives here.
+   */
   @Field(() => String)
   @IsString()
-  payerId: string;
-
-  @Field(() => String)
-  @IsString()
-  receiverId: string;
-
-  @Field(() => PaymentType)
-  @IsEnum(PaymentType)
-  paymentType: PaymentType;
-
-  @Field(() => Int)
-  @IsNumber()
-  @Min(1)
-  chileanConfigId: number;
+  @IsUrl({ require_tld: false, require_protocol: true })
+  returnUrl: string;
 }

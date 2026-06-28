@@ -11,6 +11,18 @@ pipeline {
 
   stages {
 
+    stage('Skip CI check') {
+      steps {
+        script {
+          def msg = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim()
+          if (msg.contains('[skip ci]')) {
+            currentBuild.result = 'NOT_BUILT'
+            error('Version bump commit — skipping pipeline.')
+          }
+        }
+      }
+    }
+
     stage('Install') {
       steps {
         sh 'npm ci'

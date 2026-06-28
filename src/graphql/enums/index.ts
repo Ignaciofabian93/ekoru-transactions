@@ -32,6 +32,21 @@ export enum ServiceSortField {
 export enum ChileanPaymentProvider {
   KHIPU = 'KHIPU',
   WEBPAY = 'WEBPAY',
+  MERCADOPAGO = 'MERCADOPAGO',
+}
+
+export enum OrderStatus {
+  PENDING_PAYMENT = 'PENDING_PAYMENT',
+  PAID = 'PAID',
+  CANCELED = 'CANCELED',
+  REFUNDED = 'REFUNDED',
+}
+
+export enum ShippingMethod {
+  DELIVERED_TO_HOME = 'DELIVERED_TO_HOME',
+  IN_HOUSE_PICKUP = 'IN_HOUSE_PICKUP',
+  IN_MID_POINT_PICKUP = 'IN_MID_POINT_PICKUP',
+  CARRIER = 'CARRIER',
 }
 
 export enum PaymentStatus {
@@ -48,6 +63,7 @@ export enum PaymentStatus {
 export enum PaymentType {
   ORDER = 'ORDER',
   QUOTATION = 'QUOTATION',
+  MEMBERSHIP = 'MEMBERSHIP',
 }
 
 export enum RefundStatus {
@@ -122,7 +138,19 @@ registerEnumType(ServiceSortField, {
 
 registerEnumType(ChileanPaymentProvider, {
   name: 'ChileanPaymentProvider',
-  description: 'Chilean payment providers supported (Khipu, Webpay)',
+  description:
+    'Payment providers offered to Chilean buyers (Khipu bank-transfer, Webpay Plus cards, MercadoPago wallet/cards)',
+});
+
+registerEnumType(OrderStatus, {
+  name: 'OrderStatus',
+  description: 'Order-level lifecycle independent from shipping status',
+});
+
+registerEnumType(ShippingMethod, {
+  name: 'ShippingMethod',
+  description:
+    'How the buyer wants the order delivered. CARRIER triggers a courier quote; IN_MID_POINT_PICKUP is coordinated by chat and is not payable online.',
 });
 
 registerEnumType(PaymentStatus, {
@@ -132,7 +160,7 @@ registerEnumType(PaymentStatus, {
 
 registerEnumType(PaymentType, {
   name: 'PaymentType',
-  description: 'Payment linked to an order or a quotation',
+  description: 'Payment linked to an order, a quotation, or a membership',
 });
 
 registerEnumType(RefundStatus, {
