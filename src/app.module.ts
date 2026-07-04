@@ -44,6 +44,11 @@ import { PrometheusModule } from '@willsoto/nestjs-prometheus';
           host: configService.get<string>('REDIS_HOST', 'localhost'),
           port: configService.get<number>('REDIS_PORT', 6379),
           password: configService.get<string>('REDIS_PASSWORD'),
+          // Managed Redis (Azure Cache, Upstash, Redis Cloud) requires TLS.
+          // Self-hosted Redis on the private ekoru-net doesn't — leave unset.
+          ...(configService.get<string>('REDIS_TLS') === 'true'
+            ? { tls: {} }
+            : {}),
         },
         defaultJobOptions: {
           removeOnComplete: 100, // keep last 100 completed jobs

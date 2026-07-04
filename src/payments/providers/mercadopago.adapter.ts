@@ -31,7 +31,10 @@ export class MercadoPagoAdapter implements ProviderAdapter {
 
   private async loadSdk() {
     try {
-      const sdk = await import('mercadopago');
+      // Non-literal specifier so the subgraph type-checks and boots without the
+      // `mercadopago` package installed (Webpay-only launch). Resolved at runtime.
+      const moduleName: string = 'mercadopago';
+      const sdk = await import(moduleName);
       return sdk;
     } catch {
       throw new InternalServerError(

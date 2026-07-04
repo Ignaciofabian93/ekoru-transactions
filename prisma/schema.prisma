@@ -265,24 +265,25 @@ model PaymentWebhook {
 }
 
 model Order {
-  id                          Int              @id @default(autoincrement())
-  buyerId                     String
-  sellerId                    String
-  status                      OrderStatus      @default(PENDING_PAYMENT)
-  subtotal                    Int              @default(0)
-  shippingCost                Int              @default(0)
-  taxAmount                   Int              @default(0)
-  total                       Int              @default(0)
-  currency                    String           @default("CLP")
-  shippingMethod              ShippingMethod   @default(DELIVERED_TO_HOME)
-  shippingAddressId           Int?
-  shippingStatusId            Int
-  version                     Int              @default(0)
-  createdAt                   DateTime         @default(now())
-  updatedAt                   DateTime         @updatedAt
-  shippingStatus              ShippingStatus   @relation(fields: [shippingStatusId], references: [id])
-  orderItem                   OrderItem[]
-  payment                     Payment[]
+  id                            Int              @id @default(autoincrement())
+  buyerId                       String
+  sellerId                      String
+  status                        OrderStatus      @default(PENDING_PAYMENT)
+  subtotal                      Int              @default(0)
+  shippingCost                  Int              @default(0)
+  taxAmount                     Int              @default(0)
+  total                         Int              @default(0)
+  currency                      String           @default("CLP")
+  shippingMethod                ShippingMethod   @default(DELIVERED_TO_HOME)
+  shippingAddressId             Int?
+  shippingStatusId              Int
+  version                       Int              @default(0)
+  createdAt                     DateTime         @default(now())
+  updatedAt                     DateTime         @updatedAt
+  shippingAddress               ShippingAddress? @relation(fields: [shippingAddressId], references: [id])
+  shippingStatus                ShippingStatus   @relation(fields: [shippingStatusId], references: [id])
+  orderItem                     OrderItem[]
+  payment                       Payment[]
 
   @@index([buyerId])
   @@index([sellerId])
@@ -314,5 +315,26 @@ model ShippingStatus {
   createdAt DateTime      @default(now())
   updatedAt DateTime      @updatedAt
   order     Order[]
+}
+
+model ShippingAddress {
+  id            Int      @id @default(autoincrement())
+  recipientName String
+  phone         String
+  countryId     Int
+  regionId      Int
+  cityId        Int
+  countyId      Int
+  street        String
+  reference     String?
+  zipCode       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  order         Order[]
+
+  @@index([countryId])
+  @@index([regionId])
+  @@index([cityId])
+  @@index([countyId])
 }
 

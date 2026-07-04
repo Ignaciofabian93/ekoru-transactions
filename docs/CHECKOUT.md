@@ -1,5 +1,8 @@
 # Checkout subgraph changes (2026-05-26)
 
+> **Runtime reference** for this layer (mutations, adapter contract, status
+> mapping, adding a provider): [`PAYMENT_FLOW.md`](./PAYMENT_FLOW.md).
+
 This subgraph now owns the full Order → Payment lifecycle that the web app
 checkout flow drives. See the cross-repo reference doc at
 [`ekoru-web-app/docs/CHECKOUT.md`](../../ekoru-web-app/docs/CHECKOUT.md) §2

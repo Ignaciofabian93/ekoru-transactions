@@ -400,11 +400,7 @@ export class PaymentsService {
     provider: ChileanPaymentProvider;
     rawPayload: Record<string, unknown>;
   }): Promise<{ paymentId: number; status: PaymentStatus }> {
-    const externalId = this._extractExternalId(provider, rawPayload);
-    const payment = await this.prisma.payment.findFirst({
-      where: { externalId, paymentProvider: provider },
-      select: { id: true, externalId: true, externalToken: true, chileanConfigId: true, orderId: true },
-    });
+    const payment = await this._findPaymentForReturn(provider, rawPayload);
     if (!payment) {
       throw new NotFoundError('No se encontró el pago para este retorno');
     }
@@ -540,6 +536,48 @@ export class PaymentsService {
       case 'PROCESSING':
         return PaymentStatus.PROCESSING;
     }
+  }
+
+  /**
+   * Locates the canonical Payment row for a provider return.
+   *
+   * Webpay's normal return carries only `token_ws` (no buy order), which we
+   * stored as `externalToken`, so we look up by token there. Its abort/timeout
+   * returns instead carry `TBK_ORDEN_COMPRA` (our `externalId`) with no usable
+   * token. Other providers always identify the payment by `externalId`.
+   *
+   * Looking up by token first also avoids a `findFirst({ externalId: undefined })`
+   * that would otherwise silently match the first Webpay row in the table.
+   */
+  private async _findPaymentForReturn(
+    provider: ChileanPaymentProvider,
+    payload: Record<string, unknown>,
+  ) {
+    const select = {
+      id: true,
+      externalId: true,
+      externalToken: true,
+      chileanConfigId: true,
+      orderId: true,
+    } as const;
+
+    if (provider === ChileanPaymentProvider.WEBPAY) {
+      const tokenWs = payload['token_ws'] as string | undefined;
+      if (tokenWs) {
+        const byToken = await this.prisma.payment.findFirst({
+          where: { externalToken: tokenWs, paymentProvider: provider },
+          select,
+        });
+        if (byToken) return byToken;
+      }
+    }
+
+    const externalId = this._extractExternalId(provider, payload);
+    if (!externalId) return null;
+    return this.prisma.payment.findFirst({
+      where: { externalId, paymentProvider: provider },
+      select,
+    });
   }
 
   /**

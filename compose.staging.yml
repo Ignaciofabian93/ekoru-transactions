@@ -1,0 +1,81 @@
+name: 'ekoru-transactions-staging'
+
+services:
+  ekoru-transactions-staging:
+    image: ekoru-transactions:staging
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    container_name: ekoru-transactions-staging
+    env_file:
+      - .env.staging
+    ports:
+      - '4007:4007'
+    depends_on:
+      ekoru-transactions-redis-staging:
+        condition: service_healthy
+    networks:
+      - ekoru-staging-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5' # Maximum 0.5 CPU cores (staging environment)
+          memory: 512M # Maximum 512MB RAM (staging environment)
+        reservations:
+          cpus: '0.25' # Minimum 0.25 CPU cores reserved
+          memory: 256M # Minimum 256MB RAM reserved
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'wget',
+          '--quiet',
+          '--tries=1',
+          '--spider',
+          'http://localhost:4007/health',
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Per-environment Redis for the BullMQ queue — kept separate from prod so
+  # staging jobs never touch prod job state. Reachable only over
+  # `ekoru-staging-network` by its container name (= REDIS_HOST in .env.staging).
+  ekoru-transactions-redis-staging:
+    image: redis:7-alpine
+    restart: always
+    container_name: ekoru-transactions-redis-staging
+    env_file:
+      - .env.staging
+    command: >
+      sh -c 'exec redis-server
+      --requirepass "$$REDIS_PASSWORD"
+      --maxmemory-policy noeviction
+      --appendonly yes'
+    volumes:
+      - ekoru-transactions-redis-staging-data:/data
+    networks:
+      - ekoru-staging-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli -a "$$REDIS_PASSWORD" ping | grep -q PONG']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  ekoru-transactions-redis-staging-data:
+
+networks:
+  ekoru-staging-network:
+    external: true

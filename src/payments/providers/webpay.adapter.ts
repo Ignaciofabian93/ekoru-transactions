@@ -24,8 +24,10 @@ import type {
  *      `{ token, url }`. URL is Transbank's hosted form page.
  *   2. Frontend submits a hidden HTML form POST to `url` with field
  *      `name="token_ws"` set to `token`. (Webpay does NOT accept GET.)
- *   3. After the buyer pays, Transbank POSTs `token_ws` to `returnUrl`.
- *   4. We call `tx.commit(token)` to finalize and read the result.
+ *   3. After the buyer pays, Transbank POSTs back to `returnUrl`. The body
+ *      shape depends on what happened — see `confirm()` for the four cases
+ *      Transbank documents under "Requerimientos de página de resultado".
+ *   4. We call `tx.commit(token_ws)` to finalize ONLY in the normal flow.
  */
 @Injectable()
 export class WebpayAdapter implements ProviderAdapter {
@@ -37,7 +39,7 @@ export class WebpayAdapter implements ProviderAdapter {
    */
   private async loadSdk() {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const sdk = await import('transbank-sdk');
       return sdk;
     } catch {
@@ -47,7 +49,12 @@ export class WebpayAdapter implements ProviderAdapter {
     }
   }
 
-  async initiate(args: InitiatePaymentArgs): Promise<InitiatePaymentResult> {
+  /**
+   * Builds a configured `WebpayPlus.Transaction`. Integration uses Transbank's
+   * shared test credentials; production uses the seller's own commerce code +
+   * API key. Centralized here so `initiate()` and `confirm()` can't drift.
+   */
+  private async buildTransaction(config: InitiatePaymentArgs['config']) {
     const sdk = await this.loadSdk();
     const {
       WebpayPlus,
@@ -55,15 +62,14 @@ export class WebpayAdapter implements ProviderAdapter {
       IntegrationCommerceCodes,
       IntegrationApiKeys,
       Environment,
-    } = sdk as any; // eslint-disable-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } = sdk as any; // eslint-disable-line @typescript-eslint/no-unsafe-assignment
 
-    const isProd = args.config.environment === 'PRODUCTION';
+    const isProd = config.environment === 'PRODUCTION';
     const commerceCode = isProd
-      ? args.config.merchantId
+      ? config.merchantId
       : IntegrationCommerceCodes.WEBPAY_PLUS;
-    const apiKey = isProd
-      ? args.config.secretKey
-      : IntegrationApiKeys.WEBPAY;
+    const apiKey = isProd ? config.secretKey : IntegrationApiKeys.WEBPAY;
     const env = isProd ? Environment.Production : Environment.Integration;
 
     if (!commerceCode || !apiKey) {
@@ -72,12 +78,25 @@ export class WebpayAdapter implements ProviderAdapter {
       );
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return
+    return new WebpayPlus.Transaction(new Options(commerceCode, apiKey, env));
+  }
+
+  async initiate(args: InitiatePaymentArgs): Promise<InitiatePaymentResult> {
     // Webpay buyOrder must be ≤ 26 chars and unique per transaction.
-    const buyOrder = `ekoru-${args.orderId}-${Date.now().toString(36)}`.slice(0, 26);
+    const buyOrder = `ekoru-${args.orderId}-${Date.now().toString(36)}`.slice(
+      0,
+      26,
+    );
     const sessionId = `s-${args.paymentId}`.slice(0, 61);
 
-    const tx = new WebpayPlus.Transaction(new Options(commerceCode, apiKey, env)); // eslint-disable-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    const response = (await tx.create(buyOrder, sessionId, args.amount, args.returnUrl)) as {
+    const tx = await this.buildTransaction(args.config);
+    const response = (await tx.create(
+      buyOrder,
+      sessionId,
+      args.amount,
+      args.returnUrl,
+    )) as {
       token: string;
       url: string;
     };
@@ -93,39 +112,74 @@ export class WebpayAdapter implements ProviderAdapter {
     };
   }
 
+  /**
+   * Resolves a Webpay return. Implements Transbank's "result page
+   * requirements": the return URL can be hit in four distinct shapes and only
+   * the first one is a real authorization that may be committed.
+   *
+   * https://www.transbankdevelopers.cl/documentacion/como_empezar#requerimientos-de-pagina-de-resultado
+   *
+   *   | token_ws | TBK_TOKEN | Meaning                                    | Action      |
+   *   |----------|-----------|--------------------------------------------|-------------|
+   *   | yes      | no        | Normal flow — buyer finished on the form   | commit()    |
+   *   | no       | yes       | Buyer pressed "Anular" on the Webpay form  | CANCELLED   |
+   *   | no       | no        | Form timeout (~10 min idle), never paid    | EXPIRED     |
+   *   | yes      | yes       | Abnormal flow (e.g. double submit/timeout) | FAILED      |
+   *
+   * Only the raw return payload decides the case — never the token we stored
+   * at create time, otherwise an aborted return would look "normal".
+   */
   async confirm(args: ConfirmPaymentArgs): Promise<ConfirmPaymentResult> {
-    const sdk = await this.loadSdk();
-    const { WebpayPlus, Options, IntegrationCommerceCodes, IntegrationApiKeys, Environment } =
-      sdk as any; // eslint-disable-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment
+    const payload = args.rawPayload;
+    const tokenWs = payload['token_ws'] as string | undefined;
+    const tbkToken = payload['TBK_TOKEN'] as string | undefined;
 
-    const token = args.externalToken ?? (args.rawPayload['token_ws'] as string | undefined);
-    if (!token) {
-      this.logger.warn('Webpay confirm called without a token');
-      return { status: 'FAILED', raw: { reason: 'missing_token' } };
+    // Abnormal: both tokens arrive together → invalid, never commit.
+    if (tokenWs && tbkToken) {
+      this.logger.warn(
+        'Webpay return carried token_ws and TBK_TOKEN together — treating as failed',
+      );
+      return {
+        status: 'FAILED',
+        raw: { reason: 'webpay_invalid_double_token', payload },
+      };
     }
 
-    const isProd = args.config.environment === 'PRODUCTION';
-    const commerceCode = isProd
-      ? args.config.merchantId
-      : IntegrationCommerceCodes.WEBPAY_PLUS;
-    const apiKey = isProd
-      ? args.config.secretKey
-      : IntegrationApiKeys.WEBPAY;
-    const env = isProd ? Environment.Production : Environment.Integration;
+    // Buyer aborted on the Webpay form (pressed "Anular"): TBK_TOKEN, no token_ws.
+    // The transaction was never authorized, so there is nothing to commit.
+    if (!tokenWs && tbkToken) {
+      return {
+        status: 'CANCELLED',
+        raw: { reason: 'webpay_user_aborted', payload },
+      };
+    }
 
-    const tx = new WebpayPlus.Transaction(new Options(commerceCode, apiKey, env)); // eslint-disable-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    // Form timeout (buyer idle ~10 min): no token at all, only
+    // TBK_ORDEN_COMPRA / TBK_ID_SESION. Nothing to commit.
+    if (!tokenWs && !tbkToken) {
+      return {
+        status: 'EXPIRED',
+        raw: { reason: 'webpay_form_timeout', payload },
+      };
+    }
 
+    // Normal flow: token_ws present → commit and read the authorization result.
+    const tx = await this.buildTransaction(args.config);
     try {
-      const result = (await tx.commit(token)) as {
+      const result = (await tx.commit(tokenWs)) as {
         status: string;
         response_code: number;
         authorization_code?: string;
+        buy_order?: string;
       };
-      const status =
-        result.status === 'AUTHORIZED' && result.response_code === 0
-          ? ('COMPLETED' as const)
-          : ('FAILED' as const);
-      return { status, raw: result as unknown as Record<string, unknown> };
+      // Webpay Plus: an approved card auth is status=AUTHORIZED + response_code=0.
+      // Anything else (declined, insufficient funds, etc.) is a rejection.
+      const approved =
+        result.status === 'AUTHORIZED' && result.response_code === 0;
+      return {
+        status: approved ? 'COMPLETED' : 'FAILED',
+        raw: result as unknown as Record<string, unknown>,
+      };
     } catch (err) {
       this.logger.error('Webpay commit failed', err);
       return {
@@ -135,7 +189,9 @@ export class WebpayAdapter implements ProviderAdapter {
     }
   }
 
-  async handleWebhook(_payload: Record<string, unknown>): Promise<ConfirmPaymentResult> {
+  async handleWebhook(
+    _payload: Record<string, unknown>,
+  ): Promise<ConfirmPaymentResult> {
     // Webpay Plus doesn't push async webhooks — the return-URL POST IS the
     // notification. Calling this is a no-op.
     return { status: 'PROCESSING', raw: { note: 'webpay_no_webhook' } };
