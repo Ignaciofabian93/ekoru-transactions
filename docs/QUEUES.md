@@ -124,8 +124,8 @@ Set per environment:
 > `REDIS_PASSWORD` is a **secret** — the committed env files hold a placeholder.
 > The real value lives only in the server-side secret files the Jenkins deploy
 > copies over (`/opt/ekoru/secrets/ekoru-transactions/.env.{staging,prod}`, §6).
-> The same env file feeds both the app and the Redis service, so the password is
-> defined once.
+> The same env file feeds both the app and its Redis container, so the password
+> is defined once.
 
 Only `host` / `port` / `password` are wired. If you later use a **managed
 provider that requires TLS** (Upstash, Azure Cache for Redis, etc.), add a `tls`
@@ -164,14 +164,13 @@ docker exec -it ekoru-redis redis-cli ping   # -> PONG
 Prefer no Docker? Install Redis natively (`brew install redis`,
 `apt install redis-server`, or Memurai/WSL on Windows) and start it on 6379.
 
-### 5b. Prod & staging — co-deployed via compose (recommended, $0)
+### 5b. Prod & staging — self-hosted `redis:7-alpine` on IONOS ($0)
 
-You don't run anything by hand. Like the other subgraphs, transactions deploys
-with `docker compose` ([`Jenkinsfile`](../Jenkinsfile)), and its
-[`compose.prod.yml`](../compose.prod.yml) /
-[`compose.staging.yml`](../compose.staging.yml) each declare **both** the app
-and a `redis:7-alpine` service on the shared external network. `compose up`
-brings Redis up with the app — no signup, no manual `docker run`. See §6.
+A dedicated Redis container per environment, run once from
+[`redis.prod.yml`](../redis.prod.yml) / [`redis.staging.yml`](../redis.staging.yml)
+and left running — separate from the app's deploy compose (same split search
+uses for Typesense). No signup, no managed service. Full topology + commands in
+§6.
 
 ### 5c. Production — managed Redis (if you'd rather not self-host)
 
@@ -187,76 +186,77 @@ provider lets you.
 
 ---
 
-## 6. Deploying & connecting it (compose)
+## 6. Deploying on IONOS (app + separate Redis)
 
-### One Redis or two? → **one per environment**
+### Topology: two containers, managed separately (like search + Typesense)
 
-Staging and prod get **separate** Redis instances — never a shared one. The
-queue holds real payment/refund job state; a shared Redis would let staging jobs
-and prod jobs collide in the same keyspace. So each compose file ships its own
-Redis service + its own data volume + its own password. That's the only sane
-split, and it costs nothing (both are tiny `redis:7-alpine` containers).
+The **app** and **Redis** are two independent containers, *not* one bundled
+compose. This mirrors how `ekoru-search` treats Typesense: the app's deploy
+compose is app-only, and the stateful datastore is a long-lived container the
+app just connects to. Why: the Jenkins deploy runs `compose up --force-recreate`
+on every merge — you don't want that recreating the queue's Redis each time.
 
-| Env | compose file | app + redis network | Redis service / `REDIS_HOST` | data volume |
-|---|---|---|---|---|
-| Production | [`compose.prod.yml`](../compose.prod.yml) | `ekoru-network` | `ekoru-transactions-redis` | `ekoru-transactions-redis-data` |
-| Staging | [`compose.staging.yml`](../compose.staging.yml) | `ekoru-staging-network` | `ekoru-transactions-redis-staging` | `ekoru-transactions-redis-staging-data` |
+| File | What it runs | Network | Lifecycle |
+|---|---|---|---|
+| [`compose.prod.yml`](../compose.prod.yml) | **app** `ekoru-transactions` (`4107:4007`) | `ekoru-network` | recreated every deploy (Jenkins) |
+| [`redis.prod.yml`](../redis.prod.yml) | **redis** `ekoru-transactions-redis` | `ekoru-network` | started **once**, left running |
+| [`compose.staging.yml`](../compose.staging.yml) | **app** `ekoru-transactions-staging` (`4007:4007`) | `ekoru-staging-network` | recreated every deploy |
+| [`redis.staging.yml`](../redis.staging.yml) | **redis** `ekoru-transactions-redis-staging` | `ekoru-staging-network` | started once, left running |
 
-### How the wiring works
+**One Redis per environment** — never shared. Each env has its own Redis
+container, data volume, and password, so staging jobs never touch prod job
+state.
 
-Each compose file declares two services on the shared **external** network
-(`external: true` — created outside compose; they already exist as
-`ekoru-network` / `ekoru-staging-network`). Because both services sit in the same
-compose project on that network, the app reaches Redis by the Redis service's
-container name — which is exactly what `REDIS_HOST` is set to in
-[`.env.prod`](../.env.prod) / [`.env.staging`](../.env.staging). The app's
-`depends_on … condition: service_healthy` holds startup until Redis answers
-`PING`.
+### How the app finds Redis
 
-Redis is **not** published to the host (`-p` omitted) — reachable only from
-inside the network. The `redis-server` flags match §3 (`--requirepass`,
-`--maxmemory-policy noeviction`, `--appendonly yes`), and `REDIS_PASSWORD` is
-read from the **same** `env_file` as the app, so it's defined once.
+Both containers sit on the same external network (`ekoru-network` /
+`ekoru-staging-network` — already created, shared by every subgraph). Docker's
+embedded DNS resolves the Redis container by its name, which is exactly what
+`REDIS_HOST` is set to in [`.env.prod`](../.env.prod) /
+[`.env.staging`](../.env.staging). Redis is **not** host-published (`-p`
+omitted) — reachable only from inside the network. Both files read
+`REDIS_PASSWORD` from the same env file, so the password is defined once.
 
-### Deploy
-
-[`Jenkinsfile`](../Jenkinsfile) follows the same shape as the sibling subgraphs
-(stores/marketplace/users): build → test → **Deploy Staging** → manual *Confirm
-E2E OK* gate → **Deploy Production**. Each deploy stage copies the real secret
-env-file over the placeholder, then `compose up`:
+### First-time host setup (once per environment)
 
 ```sh
-cp /opt/ekoru/secrets/ekoru-transactions/.env.prod ${WORKSPACE}/.env.prod
-docker compose -f compose.prod.yml build --no-cache
-docker compose -f compose.prod.yml up -d --force-recreate
-```
-
-So the only place the **real** `REDIS_PASSWORD` lives is
-`/opt/ekoru/secrets/ekoru-transactions/.env.{staging,prod}` on the deploy host
-(keep it `chmod 600`, out of git). The committed env files carry a
-`CHANGE_ME_STRONG_SECRET` placeholder only.
-
-### First-time setup on the host
-
-The external networks already exist (used by every subgraph). Nothing to create;
-just make sure the secret env-files are present:
-
-```sh
-# on the deploy host, once
+# 1. secret env-files on the deploy host (real REDIS_PASSWORD + full runtime env:
+#    DATABASE_URL, INTERNAL_SERVICE_SECRET, MARKETPLACE_URL, STORES_URL,
+#    GATEWAY_BASE_URL). chmod 600. The networks already exist.
 mkdir -p /opt/ekoru/secrets/ekoru-transactions
-# create .env.staging and .env.prod there with a strong REDIS_PASSWORD
-# (plus DATABASE_URL, INTERNAL_SERVICE_SECRET, MARKETPLACE_URL, STORES_URL,
-#  GATEWAY_BASE_URL — the full runtime env). chmod 600 both.
+#   …place .env.prod and .env.staging here…
+
+# 2. bring Redis up ONCE (from a checkout with the env-file present). It has
+#    restart: always, so it survives reboots and stays up across app deploys.
+docker compose -f redis.prod.yml up -d        # prod
+docker compose -f redis.staging.yml up -d     # staging
 ```
 
 Also add a `github-deploy-key-transactions` SSH credential in Jenkins (matches
 the `github-deploy-key-<service>` convention) for the version-tag push.
 
+### App deploys (Jenkins, every merge to main)
+
+[`Jenkinsfile`](../Jenkinsfile) matches the sibling subgraphs
+(stores/marketplace/users): build → test → **Deploy Staging** → manual *Confirm
+E2E OK* gate → **Deploy Production**. Each deploy stage copies the real secret
+env-file over the placeholder, then brings up **only the app**:
+
+```sh
+cp /opt/ekoru/secrets/ekoru-transactions/.env.prod ${WORKSPACE}/.env.prod
+docker compose -f compose.prod.yml build --no-cache
+docker compose -f compose.prod.yml up -d --force-recreate   # app only; Redis untouched
+```
+
+Redis is deliberately **not** in the Jenkins flow — it's long-lived infra. If you
+ever need to bounce or upgrade it, do it deliberately with `redis.<env>.yml`
+(the AOF volume persists jobs across the restart).
+
 ### Managed Redis instead (§5c)
 
-Drop the `redis` service from the compose file, point `REDIS_HOST` at the
-provider host, add `REDIS_PORT` / `REDIS_PASSWORD`, set `REDIS_TLS=true`, and
-apply the §4 code tweak. No network/volume needed.
+Skip `redis.<env>.yml` entirely, point `REDIS_HOST` at the provider host, add
+`REDIS_PORT` / `REDIS_PASSWORD`, set `REDIS_TLS=true`, and apply the §4 code
+tweak. No network/volume needed.
 
 ---
 
@@ -276,8 +276,8 @@ apply the §4 code tweak. No network/volume needed.
 
 | Symptom | Likely cause |
 |---|---|
-| `ECONNREFUSED 127.0.0.1:6379` in prod | `REDIS_HOST` unset → defaulting to `localhost` (the app container). Set it to the compose Redis service name — `ekoru-transactions-redis` (prod) / `-staging` — or your managed host (§4, §6). |
-| `getaddrinfo ENOTFOUND ekoru-transactions-redis` | App and Redis aren't on the same network. Both compose services must be on `ekoru-network` (prod) / `ekoru-staging-network`; confirm the external network exists (`docker network ls`). |
+| `ECONNREFUSED 127.0.0.1:6379` in prod | `REDIS_HOST` unset → defaulting to `localhost` (the app container). Set it to the Redis container name — `ekoru-transactions-redis` (prod) / `-staging` — or your managed host (§4, §6). |
+| `getaddrinfo ENOTFOUND ekoru-transactions-redis` | Redis container isn't up or isn't on the app's network. Start `redis.<env>.yml`; both it and the app must be on `ekoru-network` (prod) / `ekoru-staging-network` (`docker network ls`, `docker ps`). |
 | `NOAUTH Authentication required` | Redis has `--requirepass` but `REDIS_PASSWORD` is unset/wrong. |
 | Managed Redis connects then drops | TLS required — set `REDIS_TLS=true` + the §4 code change. |
 | Jobs enqueue but never process | Worker not running — confirm `QueuesModule` is imported in [`app.module.ts`](../src/app.module.ts). |

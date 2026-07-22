@@ -1,5 +1,8 @@
 name: 'ekoru-transactions-staging'
 
+# App only. Redis lives in redis.staging.yml (separate, long-lived container on
+# ekoru-staging-network). The app reaches it by container name (REDIS_HOST in
+# .env.staging).
 services:
   ekoru-transactions-staging:
     image: ekoru-transactions:staging
@@ -12,9 +15,6 @@ services:
       - .env.staging
     ports:
       - '4007:4007'
-    depends_on:
-      ekoru-transactions-redis-staging:
-        condition: service_healthy
     networks:
       - ekoru-staging-network
     deploy:
@@ -39,42 +39,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-
-  # Per-environment Redis for the BullMQ queue — kept separate from prod so
-  # staging jobs never touch prod job state. Reachable only over
-  # `ekoru-staging-network` by its container name (= REDIS_HOST in .env.staging).
-  ekoru-transactions-redis-staging:
-    image: redis:7-alpine
-    restart: always
-    container_name: ekoru-transactions-redis-staging
-    env_file:
-      - .env.staging
-    command: >
-      sh -c 'exec redis-server
-      --requirepass "$$REDIS_PASSWORD"
-      --maxmemory-policy noeviction
-      --appendonly yes'
-    volumes:
-      - ekoru-transactions-redis-staging-data:/data
-    networks:
-      - ekoru-staging-network
-    deploy:
-      resources:
-        limits:
-          cpus: '0.25'
-          memory: 256M
-        reservations:
-          cpus: '0.1'
-          memory: 64M
-    healthcheck:
-      test: ['CMD-SHELL', 'redis-cli -a "$$REDIS_PASSWORD" ping | grep -q PONG']
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
-volumes:
-  ekoru-transactions-redis-staging-data:
 
 networks:
   ekoru-staging-network:

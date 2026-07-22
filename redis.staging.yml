@@ -1,0 +1,47 @@
+name: 'ekoru-transactions-redis-staging'
+
+# Staging Redis — separate instance/volume/password from prod so staging jobs
+# never touch prod job state. Managed independently, like redis.prod.yml:
+#
+#   docker compose -f redis.staging.yml up -d
+#
+# Requires .env.staging present (for REDIS_PASSWORD) and the external
+# `ekoru-staging-network`. Reachable only over the network by the container name
+# `ekoru-transactions-redis-staging` (= REDIS_HOST in .env.staging).
+services:
+  ekoru-transactions-redis-staging:
+    image: redis:7-alpine
+    restart: always
+    container_name: ekoru-transactions-redis-staging
+    env_file:
+      - .env.staging
+    command: >
+      sh -c 'exec redis-server
+      --requirepass "$$REDIS_PASSWORD"
+      --maxmemory-policy noeviction
+      --appendonly yes'
+    volumes:
+      - ekoru-transactions-redis-staging-data:/data
+    networks:
+      - ekoru-staging-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli -a "$$REDIS_PASSWORD" ping | grep -q PONG']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  ekoru-transactions-redis-staging-data:
+
+networks:
+  ekoru-staging-network:
+    external: true

@@ -1,5 +1,9 @@
 name: 'ekoru-transactions-prod'
 
+# App only. Redis is a separate, independently-managed container (see
+# redis.prod.yml) so app redeploys never recreate the stateful queue store —
+# same split search uses for Typesense. The app reaches Redis over ekoru-network
+# by container name (REDIS_HOST in .env.prod).
 services:
   ekoru-transactions:
     image: ekoru-transactions:prod
@@ -12,9 +16,6 @@ services:
       - .env.prod
     ports:
       - '4107:4007'
-    depends_on:
-      ekoru-transactions-redis:
-        condition: service_healthy
     networks:
       - ekoru-network
     deploy:
@@ -39,46 +40,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-
-  # BullMQ backing store. Only ekoru-transactions uses Redis; it is co-deployed
-  # here so the queue has an isolated, per-environment Redis. Not published to
-  # the host — reachable only over `ekoru-network` by its container name
-  # (= REDIS_HOST in .env.prod). Password is read from the same env_file, so
-  # .env.prod is the single source of truth for REDIS_PASSWORD.
-  ekoru-transactions-redis:
-    image: redis:7-alpine
-    restart: always
-    container_name: ekoru-transactions-redis
-    env_file:
-      - .env.prod
-    # noeviction: BullMQ stores job state as Redis keys — evicting them loses
-    # jobs. appendonly: survive restarts (queued/in-flight refund jobs).
-    command: >
-      sh -c 'exec redis-server
-      --requirepass "$$REDIS_PASSWORD"
-      --maxmemory-policy noeviction
-      --appendonly yes'
-    volumes:
-      - ekoru-transactions-redis-data:/data
-    networks:
-      - ekoru-network
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
-        reservations:
-          cpus: '0.25'
-          memory: 128M
-    healthcheck:
-      test: ['CMD-SHELL', 'redis-cli -a "$$REDIS_PASSWORD" ping | grep -q PONG']
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
-volumes:
-  ekoru-transactions-redis-data:
 
 networks:
   ekoru-network:

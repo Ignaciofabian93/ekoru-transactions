@@ -90,6 +90,8 @@ export enum TransactionKind {
   REPAIR = 'REPAIR',
   ATTENDTOWORKSHOP = 'ATTENDTOWORKSHOP',
   ATTENDTOEVENT = 'ATTENDTOEVENT',
+  REGISTRATION = 'REGISTRATION',
+  BONUS = 'BONUS',
 }
 
 export enum ExchangeStatus {
