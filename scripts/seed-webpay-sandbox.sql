@@ -12,8 +12,10 @@
 --
 -- 1. Find the seller id (the OWNER of the product you'll buy, not the buyer):
 --      SELECT id, email FROM "Seller" ORDER BY "createdAt" DESC LIMIT 20;
--- 2. Paste it into :seller_id below (keep the quotes).
--- 3. Run against the staging DB:
+-- 2. Put it in the \set below (plain single quotes are fine — the SQL uses the
+--    :'seller_id' form, which quotes it as a string literal on substitution).
+-- 3. Run against the staging DB (must be `-f` or piped stdin, NOT `-c`, because
+--    of the \set meta-command):
 --      psql "$DATABASE_URL" -f scripts/seed-webpay-sandbox.sql
 --    or from inside the container's network:
 --      docker exec -i <postgres-container> psql -U <user> -d ekoru-dev < scripts/seed-webpay-sandbox.sql
@@ -24,7 +26,7 @@
 INSERT INTO "ChileanPaymentConfig"
   ("sellerId", "provider", "environment", "isActive", "createdAt", "updatedAt")
 VALUES
-  (:seller_id, 'WEBPAY', 'SANDBOX', true, now(), now())
+  (:'seller_id', 'WEBPAY', 'SANDBOX', true, now(), now())
 ON CONFLICT ("sellerId", "provider")
 DO UPDATE SET
   "environment" = EXCLUDED."environment",
@@ -34,4 +36,4 @@ DO UPDATE SET
 -- Verify:
 SELECT id, "sellerId", provider, environment, "isActive"
 FROM "ChileanPaymentConfig"
-WHERE "sellerId" = :seller_id;
+WHERE "sellerId" = :'seller_id';
