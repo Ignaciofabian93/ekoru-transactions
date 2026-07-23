@@ -8,6 +8,7 @@ import {
   RevenueStats,
   MonthlyRevenue,
   CreatePaymentResult,
+  ProviderReturnResult,
 } from './entities/index.js';
 import {
   CreatePaymentInput,
@@ -154,19 +155,22 @@ export class PaymentsResolver {
   // and calls these mutations behind an INTERNAL_SERVICE_SECRET header. We
   // verify that header here before mutating any payment state.
 
-  @Mutation(() => PaymentStatus, { name: 'processProviderReturn' })
+  @Mutation(() => ProviderReturnResult, { name: 'processProviderReturn' })
   async processProviderReturn(
     @Args('provider', { type: () => ChileanPaymentProvider }) provider: ChileanPaymentProvider,
     @Args('payload', { type: () => GraphQLJSON }) payload: Record<string, unknown>,
     @Args('internalSecret', { type: () => String }) internalSecret: string,
     @Context() ctx: { internalSecret?: string },
-  ) {
+  ): Promise<ProviderReturnResult> {
     this._assertInternal({ arg: internalSecret, ctx });
     const result = await this.paymentsService.handleProviderReturn({
       provider,
       rawPayload: payload,
     });
-    return result.status;
+    // Hand the internal Payment id back to the gateway so its confirmation
+    // redirect carries a real `paymentId` — the normal Webpay return payload
+    // (only `token_ws`) doesn't let the gateway re-derive it.
+    return { paymentId: String(result.paymentId), status: result.status };
   }
 
   @Mutation(() => PaymentStatus, { name: 'processProviderWebhook' })

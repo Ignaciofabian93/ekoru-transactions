@@ -10,3 +10,4 @@ export {
   type PaymentRedirectUnion,
 } from './payment-redirect.entity.js';
 export { CreatePaymentResult } from './create-payment-result.entity.js';
+export { ProviderReturnResult } from './provider-return-result.entity.js';
