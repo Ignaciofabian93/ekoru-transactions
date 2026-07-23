@@ -11,8 +11,6 @@ export interface MarketplaceProductPrice {
   id: number;
   sellerId: string;
   price: number;
-  hasOffer: boolean;
-  offerPrice: number | null;
   isActive: boolean;
 }
 
@@ -35,14 +33,14 @@ export class MarketplaceClient {
       throw new InternalServerError('MARKETPLACE_URL is not configured');
     }
 
+    // Marketplace products have no offer concept (that's StoreProduct only), so
+    // we don't select hasOffer/offerPrice here — they aren't on the type.
     const query = /* GraphQL */ `
       query GetProductPricesForCheckout($ids: [Int!]!) {
         productsByIds(ids: $ids) {
           id
           sellerId
           price
-          hasOffer
-          offerPrice
           isActive
         }
       }

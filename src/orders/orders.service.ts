@@ -9,7 +9,12 @@ import {
   calculatePrismaParams,
   createPaginatedResponse,
 } from '../common/utils/index.js';
-import { MarketplaceClient } from '../common/clients/index.js';
+import {
+  MarketplaceClient,
+  StoresClient,
+  type MarketplaceProductPrice,
+  type StoreProductPrice,
+} from '../common/clients/index.js';
 import { CreateOrderInput, UpdateShippingInput } from './dto/index.js';
 import {
   OrderStatus,
@@ -78,6 +83,7 @@ export class OrdersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly marketplace: MarketplaceClient,
+    private readonly stores: StoresClient,
   ) {}
 
   async getOrder(id: number) {
@@ -159,22 +165,67 @@ export class OrdersService {
       );
     }
 
-    // 1. Resolve canonical prices.
+    // Each line is either a marketplace product or a store product — never both,
+    // never neither.
+    for (const item of input.items) {
+      const hasMarketplace = typeof item.productId === 'number';
+      const hasStore = typeof item.storeProductId === 'number';
+      if (hasMarketplace === hasStore) {
+        throw new BadRequestError(
+          'Cada ítem debe referenciar exactamente un productId (marketplace) o storeProductId (tienda)',
+        );
+      }
+    }
+
+    // 1. Resolve canonical prices from each owning subgraph in parallel.
     const marketplaceIds = input.items
       .map((i) => i.productId)
       .filter((id): id is number => typeof id === 'number');
-    const products = marketplaceIds.length
-      ? await this.marketplace.getPrices(marketplaceIds)
-      : [];
+    const storeIds = input.items
+      .map((i) => i.storeProductId)
+      .filter((id): id is number => typeof id === 'number');
 
-    // 2. Validate availability + single-seller.
-    const inactive = products.filter((p) => !p.isActive);
+    const [marketplaceProducts, storeProducts] = await Promise.all([
+      marketplaceIds.length
+        ? this.marketplace.getPrices(marketplaceIds)
+        : Promise.resolve<MarketplaceProductPrice[]>([]),
+      storeIds.length
+        ? this.stores.getPrices(storeIds)
+        : Promise.resolve<StoreProductPrice[]>([]),
+    ]);
+
+    // 2. Validate availability. Store products also carry stock; marketplace
+    //    listings are single-quantity used goods with no stock counter.
+    const inactive = [
+      ...marketplaceProducts
+        .filter((p) => !p.isActive)
+        .map((p) => `mkt:${p.id}`),
+      ...storeProducts.filter((p) => !p.isActive).map((p) => `store:${p.id}`),
+    ];
     if (inactive.length > 0) {
       throw new BadRequestError(
-        `Productos no disponibles: ${inactive.map((p) => p.id).join(', ')}`,
+        `Productos no disponibles: ${inactive.join(', ')}`,
       );
     }
-    const sellerIds = Array.from(new Set(products.map((p) => p.sellerId)));
+
+    const storeStockById = new Map(storeProducts.map((p) => [p.id, p.stock]));
+    for (const item of input.items) {
+      if (typeof item.storeProductId !== 'number') continue;
+      const stock = storeStockById.get(item.storeProductId) ?? 0;
+      if (item.quantity > stock) {
+        throw new BadRequestError(
+          `Stock insuficiente para el producto de tienda ${item.storeProductId} (disponible: ${stock})`,
+        );
+      }
+    }
+
+    // 3. Single-seller across BOTH sources — an order belongs to one seller.
+    const sellerIds = Array.from(
+      new Set([
+        ...marketplaceProducts.map((p) => p.sellerId),
+        ...storeProducts.map((p) => p.sellerId),
+      ]),
+    );
     if (sellerIds.length > 1) {
       throw new BadRequestError(
         'Tu carrito tiene productos de más de un vendedor. Por ahora debes pagar cada vendedor por separado.',
@@ -188,26 +239,34 @@ export class OrdersService {
       throw new BadRequestError('No puedes comprarte productos a ti mismo');
     }
 
-    // 3. Compute totals from canonical prices.
-    const priceById = new Map(
-      products.map((p) => [p.id, p.hasOffer && p.offerPrice ? p.offerPrice : p.price]),
+    // 4. Compute totals from canonical prices. Store products honour an active
+    //    offer; marketplace products have no offer concept.
+    const mktPriceById = new Map(
+      marketplaceProducts.map((p) => [p.id, p.price]),
     );
+    const storePriceById = new Map(
+      storeProducts.map((p) => [
+        p.id,
+        p.hasOffer && p.offerPrice ? p.offerPrice : p.price,
+      ]),
+    );
+
     let subtotal = 0;
     const lineItems = input.items.map((item) => {
-      if (!item.productId) {
-        // storeProductId path will come when ekoru-stores integration lands.
-        throw new BadRequestError(
-          'Solo productos del marketplace son soportados por ahora',
-        );
-      }
-      const unitPrice = priceById.get(item.productId);
+      const isStore = typeof item.storeProductId === 'number';
+      const unitPrice = isStore
+        ? storePriceById.get(item.storeProductId!)
+        : mktPriceById.get(item.productId!);
       if (typeof unitPrice !== 'number') {
-        throw new BadRequestError(`Producto ${item.productId} sin precio`);
+        const ref = isStore
+          ? `de tienda ${item.storeProductId}`
+          : `${item.productId}`;
+        throw new BadRequestError(`Producto ${ref} sin precio`);
       }
       subtotal += unitPrice * item.quantity;
       return {
-        productId: item.productId,
-        storeProductId: undefined,
+        productId: isStore ? undefined : item.productId,
+        storeProductId: isStore ? item.storeProductId : undefined,
         quantity: item.quantity,
         price: unitPrice,
       };
@@ -229,14 +288,15 @@ export class OrdersService {
           data: { status: ShippingStage.PREPARING },
         });
 
-        const shippingAddressId = needsAddress && input.shippingAddress
-          ? (
-              await tx.shippingAddress.create({
-                data: { ...input.shippingAddress },
-                select: { id: true },
-              })
-            ).id
-          : undefined;
+        const shippingAddressId =
+          needsAddress && input.shippingAddress
+            ? (
+                await tx.shippingAddress.create({
+                  data: { ...input.shippingAddress },
+                  select: { id: true },
+                })
+              ).id
+            : undefined;
 
         return tx.order.create({
           data: {
@@ -345,7 +405,9 @@ export class OrdersService {
     }
   }
 
-  private _mapOrder<T extends { orderItem: unknown; sellerId: string; buyerId: string }>(o: T) {
+  private _mapOrder<
+    T extends { orderItem: unknown; sellerId: string; buyerId: string },
+  >(o: T) {
     const { orderItem, ...rest } = o;
     return {
       ...rest,
