@@ -26,8 +26,9 @@ COPY package.json ./
 
 COPY package-lock.json ./
 
-# Install only production dependencies
-RUN npm ci --only=production
+# Install only production dependencies (skip lifecycle scripts so the
+# "prepare" -> husky step, a devDependency, doesn't run in production)
+RUN npm ci --omit=dev --ignore-scripts
 
 # Copy prisma schema for runtime
 COPY prisma ./prisma
