@@ -39,9 +39,12 @@ export class WebpayAdapter implements ProviderAdapter {
    */
   private async loadSdk() {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       const sdk = await import('transbank-sdk');
-      return sdk;
+      // transbank-sdk is CommonJS. Under nodenext its named exports
+      // (WebpayPlus, Options, IntegrationCommerceCodes, …) land on `.default`,
+      // not the namespace top level — unwrap so callers can destructure them.
+
+      return (sdk as any).default ?? sdk;
     } catch {
       throw new InternalServerError(
         'transbank-sdk no está instalado. Ejecuta `npm i transbank-sdk` para habilitar Webpay.',
@@ -55,6 +58,8 @@ export class WebpayAdapter implements ProviderAdapter {
    * API key. Centralized here so `initiate()` and `confirm()` can't drift.
    */
   private async buildTransaction(config: InitiatePaymentArgs['config']) {
+    // loadSdk already unwraps the CommonJS interop and is typed `any`, so these
+    // destructured members need no further assertion.
     const sdk = await this.loadSdk();
     const {
       WebpayPlus,
@@ -62,8 +67,7 @@ export class WebpayAdapter implements ProviderAdapter {
       IntegrationCommerceCodes,
       IntegrationApiKeys,
       Environment,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } = sdk as any; // eslint-disable-line @typescript-eslint/no-unsafe-assignment
+    } = sdk;
 
     const isProd = config.environment === 'PRODUCTION';
     const commerceCode = isProd
@@ -78,7 +82,6 @@ export class WebpayAdapter implements ProviderAdapter {
       );
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return
     return new WebpayPlus.Transaction(new Options(commerceCode, apiKey, env));
   }
 
@@ -189,11 +192,14 @@ export class WebpayAdapter implements ProviderAdapter {
     }
   }
 
-  async handleWebhook(
-    _payload: Record<string, unknown>,
-  ): Promise<ConfirmPaymentResult> {
-    // Webpay Plus doesn't push async webhooks — the return-URL POST IS the
-    // notification. Calling this is a no-op.
-    return { status: 'PROCESSING', raw: { note: 'webpay_no_webhook' } };
+  // Webpay Plus doesn't push async webhooks — the return-URL POST IS the
+  // notification. The ProviderAdapter signature passes a payload, but this
+  // implementation ignores it, so the parameter is omitted. Nothing is awaited,
+  // so it's a plain method returning a resolved promise rather than `async`.
+  handleWebhook(): Promise<ConfirmPaymentResult> {
+    return Promise.resolve({
+      status: 'PROCESSING',
+      raw: { note: 'webpay_no_webhook' },
+    });
   }
 }
