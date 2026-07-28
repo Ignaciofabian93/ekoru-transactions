@@ -1,4 +1,12 @@
-import { Resolver, Query, Mutation, Args, Int, ID, Context } from '@nestjs/graphql';
+import {
+  Resolver,
+  Query,
+  Mutation,
+  Args,
+  Int,
+  ID,
+  Context,
+} from '@nestjs/graphql';
 import { PaymentsService } from './payments.service.js';
 import {
   Payment,
@@ -15,7 +23,10 @@ import {
   CreatePaymentConfigInput,
   RefundPaymentInput,
 } from './dto/index.js';
-import { ChileanPaymentProvider, PaymentStatus } from '../graphql/enums/index.js';
+import {
+  ChileanPaymentProvider,
+  PaymentStatus,
+} from '../graphql/enums/index.js';
 import { CurrentSeller } from '../common/decorators/index.js';
 import { GraphQLJSON } from '../graphql/scalars/index.js';
 
@@ -25,7 +36,10 @@ export class PaymentsResolver {
 
   // ─── Payment Config Queries ────────────────────────────────────────────────
 
-  @Query(() => ChileanPaymentConfig, { name: 'getPaymentConfig', nullable: true })
+  @Query(() => ChileanPaymentConfig, {
+    name: 'getPaymentConfig',
+    nullable: true,
+  })
   async getPaymentConfig(@Args('id', { type: () => ID }) id: string) {
     return this.paymentsService.getPaymentConfig(parseInt(id, 10));
   }
@@ -58,7 +72,8 @@ export class PaymentsResolver {
     @Args('payerId', { type: () => ID }) payerId: string,
     @Args('page', { type: () => Int, defaultValue: 1 }) page: number,
     @Args('pageSize', { type: () => Int, defaultValue: 10 }) pageSize: number,
-    @Args('status', { type: () => PaymentStatus, nullable: true }) status?: PaymentStatus,
+    @Args('status', { type: () => PaymentStatus, nullable: true })
+    status?: PaymentStatus,
   ) {
     return this.paymentsService.getPaymentsByPayer({
       payerId,
@@ -73,7 +88,8 @@ export class PaymentsResolver {
     @Args('receiverId', { type: () => ID }) receiverId: string,
     @Args('page', { type: () => Int, defaultValue: 1 }) page: number,
     @Args('pageSize', { type: () => Int, defaultValue: 10 }) pageSize: number,
-    @Args('status', { type: () => PaymentStatus, nullable: true }) status?: PaymentStatus,
+    @Args('status', { type: () => PaymentStatus, nullable: true })
+    status?: PaymentStatus,
   ) {
     return this.paymentsService.getPaymentsByReceiver({
       receiverId,
@@ -144,6 +160,24 @@ export class PaymentsResolver {
     return this.paymentsService.createPayment({ input, payerId });
   }
 
+  /**
+   * Starts a subscription payment to EKORU's own account. The plan price + term
+   * are resolved server-side (users subgraph); on success the users subgraph
+   * activates the membership. Returns the same redirect shape as createPayment.
+   */
+  @Mutation(() => CreatePaymentResult, { name: 'createMembershipPayment' })
+  async createMembershipPayment(
+    @Args('membershipId', { type: () => Int }) membershipId: number,
+    @Args('returnUrl', { type: () => String }) returnUrl: string,
+    @CurrentSeller() payerId: string,
+  ) {
+    return this.paymentsService.createMembershipPayment({
+      membershipId,
+      payerId,
+      returnUrl,
+    });
+  }
+
   @Mutation(() => PaymentRefund)
   async refundPayment(@Args('input') input: RefundPaymentInput) {
     return this.paymentsService.refundPayment(input);
@@ -157,8 +191,10 @@ export class PaymentsResolver {
 
   @Mutation(() => ProviderReturnResult, { name: 'processProviderReturn' })
   async processProviderReturn(
-    @Args('provider', { type: () => ChileanPaymentProvider }) provider: ChileanPaymentProvider,
-    @Args('payload', { type: () => GraphQLJSON }) payload: Record<string, unknown>,
+    @Args('provider', { type: () => ChileanPaymentProvider })
+    provider: ChileanPaymentProvider,
+    @Args('payload', { type: () => GraphQLJSON })
+    payload: Record<string, unknown>,
     @Args('internalSecret', { type: () => String }) internalSecret: string,
     @Context() ctx: { internalSecret?: string },
   ): Promise<ProviderReturnResult> {
@@ -175,9 +211,11 @@ export class PaymentsResolver {
 
   @Mutation(() => PaymentStatus, { name: 'processProviderWebhook' })
   async processProviderWebhook(
-    @Args('provider', { type: () => ChileanPaymentProvider }) provider: ChileanPaymentProvider,
+    @Args('provider', { type: () => ChileanPaymentProvider })
+    provider: ChileanPaymentProvider,
     @Args('eventType', { type: () => String }) eventType: string,
-    @Args('payload', { type: () => GraphQLJSON }) payload: Record<string, unknown>,
+    @Args('payload', { type: () => GraphQLJSON })
+    payload: Record<string, unknown>,
     @Args('internalSecret', { type: () => String }) internalSecret: string,
     @Context() ctx: { internalSecret?: string },
   ) {

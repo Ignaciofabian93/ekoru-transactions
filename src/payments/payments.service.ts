@@ -1,8 +1,15 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { ConfigService } from '@nestjs/config';
+import {
+  Prisma,
+  OrderStatus as PrismaOrderStatus,
+  PaymentStatus as PrismaPaymentStatus,
+  PaymentType as PrismaPaymentType,
+} from '@prisma/client';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { UsersClient } from '../common/clients/index.js';
 import {
   NotFoundError,
   BadRequestError,
@@ -19,7 +26,6 @@ import {
 } from './dto/index.js';
 import {
   ChileanPaymentProvider,
-  OrderStatus,
   PaymentStatus,
   PaymentType,
 } from '../graphql/enums/index.js';
@@ -37,6 +43,8 @@ export class PaymentsService {
     private readonly prisma: PrismaService,
     private readonly orders: OrdersService,
     private readonly providers: ProviderRegistry,
+    private readonly users: UsersClient,
+    private readonly config: ConfigService,
     @InjectQueue(PAYMENT_QUEUE) private readonly paymentQueue: Queue,
   ) {}
 
@@ -61,12 +69,15 @@ export class PaymentsService {
           // apiKey/secretKey are write-only — never expose them.
         },
       });
-      if (!config) throw new NotFoundError('Configuración de pago no encontrada');
+      if (!config)
+        throw new NotFoundError('Configuración de pago no encontrada');
       return config;
     } catch (error) {
       if (error instanceof NotFoundError) throw error;
       this.logger.error('Error al obtener la configuración de pago:', error);
-      throw new InternalServerError('Error al obtener la configuración de pago');
+      throw new InternalServerError(
+        'Error al obtener la configuración de pago',
+      );
     }
   }
 
@@ -105,7 +116,7 @@ export class PaymentsService {
         where: {
           sellerId_provider: {
             sellerId: input.sellerId,
-            provider: input.provider as ChileanPaymentProvider,
+            provider: input.provider,
           },
         },
       });
@@ -233,7 +244,7 @@ export class PaymentsService {
     if (order.buyerId !== payerId) {
       throw new BadRequestError('Esta orden no te pertenece');
     }
-    if (order.status !== OrderStatus.PENDING_PAYMENT) {
+    if (order.status !== PrismaOrderStatus.PENDING_PAYMENT) {
       throw new BadRequestError(
         `Esta orden no se puede pagar (estado actual: ${order.status})`,
       );
@@ -333,6 +344,125 @@ export class PaymentsService {
   }
 
   /**
+   * Creates a platform Payment for a membership subscription — money flows to
+   * EKORU, not to a seller. Same Webpay rail as `createPayment`, but:
+   *   - the receiver is EKORU's own platform Seller (env EKORU_PLATFORM_SELLER_ID),
+   *   - the amount/currency/term come from the users subgraph (server-side price),
+   *   - paymentType is MEMBERSHIP with the plan in `metadata`, and there is no
+   *     Order — activation happens on the return (see handleProviderReturn).
+   */
+  async createMembershipPayment({
+    membershipId,
+    payerId,
+    returnUrl,
+  }: {
+    membershipId: number;
+    payerId: string;
+    returnUrl: string;
+  }) {
+    if (!payerId) {
+      throw new BadRequestError('Debe iniciar sesión para suscribirse');
+    }
+
+    const platformSellerId = this.config.get<string>('ekoruPlatformSellerId');
+    if (!platformSellerId) {
+      throw new InternalServerError('EKORU_PLATFORM_SELLER_ID no configurado');
+    }
+
+    // 1. Price the term server-side (never from the client).
+    const charge = await this.users.getMembershipCharge(membershipId, payerId);
+
+    // 2. Resolve EKORU's own WEBPAY config — this is the receiving account.
+    const config = await this.prisma.chileanPaymentConfig.findFirst({
+      where: {
+        sellerId: platformSellerId,
+        provider: ChileanPaymentProvider.WEBPAY,
+        isActive: true,
+      },
+    });
+    if (!config) {
+      throw new BadRequestError(
+        'EKORU no tiene Webpay configurado para cobros de plataforma',
+      );
+    }
+
+    // 3. Persist a PROCESSING Payment (receiver = EKORU, type = MEMBERSHIP).
+    const payment = await this.prisma.payment.create({
+      data: {
+        amount: charge.price,
+        currency: charge.currency,
+        paymentProvider: ChileanPaymentProvider.WEBPAY,
+        description: `Suscripción EKORU (plan ${membershipId})`,
+        payerId,
+        receiverId: platformSellerId,
+        paymentType: PaymentType.MEMBERSHIP,
+        chileanConfigId: config.id,
+        status: PaymentStatus.PROCESSING,
+        metadata: { membershipId } as Prisma.InputJsonValue,
+        updatedAt: new Date(),
+      },
+      select: PAYMENT_SELECT,
+    });
+
+    // 4. Hand off to Webpay. No Order → pass 0 as the buyOrder seed.
+    const adapter = this.providers.for(ChileanPaymentProvider.WEBPAY);
+    let initiate: Awaited<ReturnType<typeof adapter.initiate>>;
+    try {
+      initiate = await adapter.initiate({
+        paymentId: payment.id,
+        orderId: 0,
+        amount: charge.price,
+        currency: charge.currency,
+        description: 'EKORU suscripción',
+        returnUrl,
+        config: {
+          environment: config.environment,
+          merchantId: config.merchantId,
+          apiKey: config.apiKey,
+          secretKey: config.secretKey,
+        },
+      });
+    } catch (err) {
+      await this.prisma.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: PaymentStatus.FAILED,
+          failureReason: err instanceof Error ? err.message : 'unknown',
+        },
+      });
+      throw err;
+    }
+
+    const updated = await this.prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        externalId: initiate.externalId,
+        externalToken: initiate.externalToken,
+        updatedAt: new Date(),
+      },
+      select: PAYMENT_SELECT,
+    });
+
+    await this.prisma.paymentTransaction.create({
+      data: {
+        paymentId: payment.id,
+        action: 'INITIATE',
+        amount: charge.price,
+        status: PaymentStatus.PROCESSING,
+        description: 'Suscripción iniciada con WEBPAY',
+      },
+    });
+
+    return {
+      paymentId: String(updated.id),
+      provider: ChileanPaymentProvider.WEBPAY,
+      status: updated.status,
+      redirect: initiate.redirect,
+      payment: this._mapPayment(updated),
+    };
+  }
+
+  /**
    * Refund a completed payment. Same async pattern as before — refunds
    * happen in the BullMQ queue because they can take seconds with some
    * providers and the user doesn't need to block on them.
@@ -344,8 +474,10 @@ export class PaymentsService {
         select: { id: true, amount: true, status: true, paymentProvider: true },
       });
       if (!payment) throw new NotFoundError('Pago no encontrado');
-      if (payment.status !== PaymentStatus.COMPLETED) {
-        throw new BadRequestError('Solo se pueden reembolsar pagos completados');
+      if (payment.status !== PrismaPaymentStatus.COMPLETED) {
+        throw new BadRequestError(
+          'Solo se pueden reembolsar pagos completados',
+        );
       }
       if (input.amount > payment.amount) {
         throw new BadRequestError(
@@ -353,7 +485,11 @@ export class PaymentsService {
         );
       }
       const refund = await this.prisma.paymentRefund.create({
-        data: { paymentId: input.paymentId, amount: input.amount, reason: input.reason },
+        data: {
+          paymentId: input.paymentId,
+          amount: input.amount,
+          reason: input.reason,
+        },
         select: {
           id: true,
           paymentId: true,
@@ -424,8 +560,55 @@ export class PaymentsService {
       rawPayload,
     });
 
-    await this._applyTerminalStatus(payment.id, payment.orderId, result.status, result.raw);
-    return { paymentId: payment.id, status: this._toPaymentStatus(result.status) };
+    await this._applyTerminalStatus(
+      payment.id,
+      payment.orderId,
+      result.status,
+      result.raw,
+    );
+
+    // Platform (subscription) payments have no Order to mark paid — instead a
+    // completed one activates the membership over in the users subgraph.
+    const status = this._toPaymentStatus(result.status);
+    if (
+      payment.paymentType === PrismaPaymentType.MEMBERSHIP &&
+      status === PaymentStatus.COMPLETED
+    ) {
+      await this._activateMembership(payment);
+    }
+
+    return { paymentId: payment.id, status };
+  }
+
+  /**
+   * Tells the users subgraph to create the subscription for a completed
+   * membership Payment. Best-effort: a failure here is logged (and recoverable
+   * from the Payment + its metadata) rather than un-doing a real charge.
+   */
+  private async _activateMembership(payment: {
+    id: number;
+    payerId: string;
+    metadata: Prisma.JsonValue | null;
+  }): Promise<void> {
+    const meta = (payment.metadata ?? {}) as { membershipId?: number };
+    if (!meta.membershipId) {
+      this.logger.error(
+        `Membership payment ${payment.id} completed without membershipId in metadata — cannot activate`,
+      );
+      return;
+    }
+    try {
+      await this.users.activateMembership({
+        sellerId: payment.payerId,
+        membershipId: meta.membershipId,
+        paymentId: payment.id,
+      });
+    } catch (err) {
+      this.logger.error(
+        `Subscription activation failed for payment ${payment.id}`,
+        err,
+      );
+    }
   }
 
   /**
@@ -464,8 +647,16 @@ export class PaymentsService {
     const result = await adapter.handleWebhook(rawPayload);
 
     if (payment && result.status !== 'PROCESSING') {
-      await this._applyTerminalStatus(payment.id, payment.orderId, result.status, result.raw);
-      return { paymentId: payment.id, status: this._toPaymentStatus(result.status) };
+      await this._applyTerminalStatus(
+        payment.id,
+        payment.orderId,
+        result.status,
+        result.raw,
+      );
+      return {
+        paymentId: payment.id,
+        status: this._toPaymentStatus(result.status),
+      };
     }
     return { paymentId: payment?.id };
   }
@@ -489,11 +680,12 @@ export class PaymentsService {
       where: { id: paymentId },
       data: {
         status,
-        processedAt: status === PaymentStatus.COMPLETED ? new Date() : undefined,
+        processedAt:
+          status === PaymentStatus.COMPLETED ? new Date() : undefined,
         failureReason:
           status === PaymentStatus.FAILED || status === PaymentStatus.CANCELLED
             ? typeof raw['error'] === 'string'
-              ? (raw['error'] as string)
+              ? raw['error']
               : null
             : undefined,
         updatedAt: new Date(),
@@ -559,6 +751,10 @@ export class PaymentsService {
       externalToken: true,
       chileanConfigId: true,
       orderId: true,
+      // Needed to activate a subscription on a completed MEMBERSHIP payment.
+      paymentType: true,
+      payerId: true,
+      metadata: true,
     } as const;
 
     if (provider === ChileanPaymentProvider.WEBPAY) {
@@ -604,7 +800,7 @@ export class PaymentsService {
         );
       case ChileanPaymentProvider.MERCADOPAGO:
         return (
-          ((payload['data'] as { id?: string } | undefined)?.id) ??
+          (payload['data'] as { id?: string } | undefined)?.id ??
           (payload['preference_id'] as string | undefined) ??
           (payload['external_reference'] as string | undefined)
         );
@@ -666,7 +862,12 @@ export class PaymentsService {
     try {
       const dateFilter =
         dateFrom || dateTo
-          ? { createdAt: { ...(dateFrom && { gte: dateFrom }), ...(dateTo && { lte: dateTo }) } }
+          ? {
+              createdAt: {
+                ...(dateFrom && { gte: dateFrom }),
+                ...(dateTo && { lte: dateTo }),
+              },
+            }
           : {};
       const [completedAgg, pendingAgg] = await Promise.all([
         this.prisma.payment.aggregate({
@@ -706,16 +907,29 @@ export class PaymentsService {
     try {
       const dateFilter =
         dateFrom || dateTo
-          ? { createdAt: { ...(dateFrom && { gte: dateFrom }), ...(dateTo && { lte: dateTo }) } }
+          ? {
+              createdAt: {
+                ...(dateFrom && { gte: dateFrom }),
+                ...(dateTo && { lte: dateTo }),
+              },
+            }
           : {};
       const [completedAgg, pendingAgg] = await Promise.all([
         this.prisma.payment.aggregate({
-          where: { receiverId: sellerId, status: PaymentStatus.COMPLETED, ...dateFilter },
+          where: {
+            receiverId: sellerId,
+            status: PaymentStatus.COMPLETED,
+            ...dateFilter,
+          },
           _sum: { amount: true, netAmount: true, fees: true },
           _count: true,
         }),
         this.prisma.payment.aggregate({
-          where: { receiverId: sellerId, status: PaymentStatus.PENDING, ...dateFilter },
+          where: {
+            receiverId: sellerId,
+            status: PaymentStatus.PENDING,
+            ...dateFilter,
+          },
           _sum: { amount: true },
           _count: true,
         }),
@@ -748,7 +962,13 @@ export class PaymentsService {
     return this._monthlyAgg({ months, sellerId });
   }
 
-  private async _monthlyAgg({ months, sellerId }: { months: number; sellerId?: string }) {
+  private async _monthlyAgg({
+    months,
+    sellerId,
+  }: {
+    months: number;
+    sellerId?: string;
+  }) {
     try {
       const dateFrom = new Date();
       dateFrom.setMonth(dateFrom.getMonth() - months);
@@ -767,14 +987,21 @@ export class PaymentsService {
       >();
       for (const p of payments) {
         const month = p.createdAt.toISOString().slice(0, 7);
-        const existing = grouped.get(month) ?? { revenue: 0, netRevenue: 0, count: 0 };
+        const existing = grouped.get(month) ?? {
+          revenue: 0,
+          netRevenue: 0,
+          count: 0,
+        };
         grouped.set(month, {
           revenue: existing.revenue + p.amount,
           netRevenue: existing.netRevenue + (p.netAmount ?? 0),
           count: existing.count + 1,
         });
       }
-      return Array.from(grouped.entries()).map(([month, data]) => ({ month, ...data }));
+      return Array.from(grouped.entries()).map(([month, data]) => ({
+        month,
+        ...data,
+      }));
     } catch (error) {
       this.logger.error('Error al obtener ingresos mensuales:', error);
       throw new InternalServerError('Error al obtener ingresos mensuales');

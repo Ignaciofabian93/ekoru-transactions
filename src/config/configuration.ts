@@ -11,9 +11,18 @@ export default () => ({
   subgraphs: {
     marketplace: process.env.MARKETPLACE_URL,
     stores: process.env.STORES_URL,
+    // Used by UsersClient to price + activate paid subscriptions (Payment
+    // receiver = EKORU). Called directly, not through the gateway.
+    users: process.env.USERS_URL,
   },
   /** Public URL of the gateway. Used to build provider return URLs. */
   gatewayBaseUrl: process.env.GATEWAY_BASE_URL,
+  /**
+   * The platform Seller id that owns EKORU's own ChileanPaymentConfig — the
+   * receiver of subscription (and later ad) payments. Its Webpay config is what
+   * charges land in.
+   */
+  ekoruPlatformSellerId: process.env.EKORU_PLATFORM_SELLER_ID,
   /**
    * Token shared between the gateway and the transactions service.
    * Required on the internal `/payments/return/*` and `/payments/webhook/*`

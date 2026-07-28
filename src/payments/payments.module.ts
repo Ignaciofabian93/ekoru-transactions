@@ -4,6 +4,7 @@ import { PaymentsService, PAYMENT_QUEUE } from './payments.service.js';
 import { PaymentsResolver } from './payments.resolver.js';
 import { PrismaModule } from '../prisma/prisma.module.js';
 import { OrdersModule } from '../orders/orders.module.js';
+import { UsersClient } from '../common/clients/index.js';
 import {
   ProviderRegistry,
   WebpayAdapter,
@@ -24,6 +25,7 @@ import {
     WebpayAdapter,
     KhipuAdapter,
     MercadoPagoAdapter,
+    UsersClient, // pricing + activation for subscription (platform) payments
   ],
   exports: [PaymentsService],
 })
