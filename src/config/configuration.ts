@@ -29,4 +29,26 @@ export default () => ({
    * mutations so only the gateway can mark payments terminal.
    */
   internalSecret: process.env.INTERNAL_SERVICE_SECRET,
+  /**
+   * Peer-to-peer marketplace deal (anti-scam) tunables. Deals meet in person,
+   * cash only; these govern the confirmation window, penalties, the sweep
+   * cadence, and the exchange price-gap that forces a cash compensation.
+   */
+  p2p: {
+    confirmWindowHours: parseInt(
+      process.env.P2P_CONFIRM_WINDOW_HOURS || '72',
+      10,
+    ),
+    strikeBlockThreshold: parseInt(
+      process.env.P2P_STRIKE_BLOCK_THRESHOLD || '3',
+      10,
+    ),
+    blockDays: parseInt(process.env.P2P_BLOCK_DAYS || '30', 10),
+    sweepEveryMin: parseInt(process.env.P2P_SWEEP_EVERY_MIN || '15', 10),
+    compensationThresholdClp: parseInt(
+      process.env.P2P_COMPENSATION_THRESHOLD_CLP || '5000',
+      10,
+    ),
+    completionPoints: parseInt(process.env.P2P_COMPLETION_POINTS || '10', 10),
+  },
 });

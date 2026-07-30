@@ -42,6 +42,21 @@ enum ExchangeStatus {
   CANCELLED
 }
 
+enum P2PStatus {
+  PROPOSED
+  ACCEPTED
+  COMPLETED
+  DISPUTED
+  EXPIRED
+  CANCELLED
+  DECLINED
+}
+
+enum P2PDealType {
+  SALE
+  EXCHANGE
+}
+
 enum ChileanPaymentProvider {
   KHIPU
   WEBPAY
@@ -336,5 +351,52 @@ model ShippingAddress {
   @@index([regionId])
   @@index([cityId])
   @@index([countyId])
+}
+
+/// Peer-to-peer marketplace deal (cash sale or exchange). Ids reference
+/// Seller/Product without a declared FK, matching Order's projection here.
+model P2PDeal {
+  id                   Int         @id @default(autoincrement())
+  type                 P2PDealType
+  status               P2PStatus   @default(PROPOSED)
+  buyerId              String
+  sellerId             String
+  productId            Int?
+  requestedProductId   Int?
+  offeredProductId     Int?
+  compensationAmount   Int         @default(0)
+  compensationPayerId  String?
+  agreedAt             DateTime?
+  confirmationDeadline DateTime?
+  buyerConfirmedAt     DateTime?
+  sellerConfirmedAt    DateTime?
+  buyerEvidenceUrl     String?
+  sellerEvidenceUrl    String?
+  completedAt          DateTime?
+  disputedAt           DateTime?
+  disputeReason        String?
+  cancelReason         String?
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  @@index([sellerId, status])
+  @@index([buyerId, status])
+  @@index([status, confirmationDeadline])
+  @@index([productId])
+  @@index([requestedProductId])
+  @@index([offeredProductId])
+}
+
+model P2PReputation {
+  id             Int       @id @default(autoincrement())
+  sellerId       String    @unique
+  strikes        Int       @default(0)
+  blockedUntil   DateTime?
+  completedCount Int       @default(0)
+  failedCount    Int       @default(0)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([blockedUntil])
 }
 

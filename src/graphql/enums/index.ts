@@ -194,3 +194,28 @@ registerEnumType(SellerType, {
   name: 'SellerType',
   description: 'Seller type (person, startup, company)',
 });
+
+export enum P2PStatus {
+  PROPOSED = 'PROPOSED',
+  ACCEPTED = 'ACCEPTED',
+  COMPLETED = 'COMPLETED',
+  DISPUTED = 'DISPUTED',
+  EXPIRED = 'EXPIRED',
+  CANCELLED = 'CANCELLED',
+  DECLINED = 'DECLINED',
+}
+
+export enum P2PDealType {
+  SALE = 'SALE',
+  EXCHANGE = 'EXCHANGE',
+}
+
+registerEnumType(P2PStatus, {
+  name: 'P2PStatus',
+  description: 'Lifecycle of a peer-to-peer marketplace deal',
+});
+
+registerEnumType(P2PDealType, {
+  name: 'P2PDealType',
+  description: 'Kind of P2P deal: cash sale or item exchange',
+});

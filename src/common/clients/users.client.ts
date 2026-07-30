@@ -74,6 +74,21 @@ export class UsersClient {
     return data.activateMembershipSubscription;
   }
 
+  /** Credits eco-points to a seller (best-effort; guarded by internal secret). */
+  async awardPoints(sellerId: string, points: number): Promise<void> {
+    const secret = this.internalSecret();
+    const mutation = /* GraphQL */ `
+      mutation AwardPoints($sellerId: ID!, $points: Int!, $secret: String!) {
+        awardPoints(
+          sellerId: $sellerId
+          points: $points
+          internalSecret: $secret
+        )
+      }
+    `;
+    await this.call(mutation, { sellerId, points, secret }, secret);
+  }
+
   // ─── helpers ──────────────────────────────────────────────────────────────
 
   private internalSecret(): string {

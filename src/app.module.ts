@@ -11,6 +11,7 @@ import { PrismaModule } from './prisma/prisma.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
 import { OrdersModule } from './orders/orders.module.js';
 import { TransactionsModule } from './transactions/transactions.module.js';
+import { MarketplaceDealsModule } from './marketplace-deals/marketplace-deals.module.js';
 import { QueuesModule } from './queues/queues.module.js';
 import { GraphQLJSON } from './graphql/scalars/index.js';
 import configuration from './config/configuration.js';
@@ -52,7 +53,7 @@ import { PrometheusModule } from '@willsoto/nestjs-prometheus';
         },
         defaultJobOptions: {
           removeOnComplete: 100, // keep last 100 completed jobs
-          removeOnFail: 500,     // keep last 500 failed jobs for debugging
+          removeOnFail: 500, // keep last 500 failed jobs for debugging
         },
       }),
     }),
@@ -89,12 +90,13 @@ import { PrometheusModule } from '@willsoto/nestjs-prometheus';
     PrismaModule,
 
     // ── Feature modules ───────────────────────────────────────────────────────
-    PaymentsModule,      // Payments – Chile-first (Khipu + Webpay)
-    OrdersModule,        // Orders + shipping tracking
-    TransactionsModule,  // Eco-transaction ledger + exchanges
+    PaymentsModule, // Payments – Chile-first (Khipu + Webpay)
+    OrdersModule, // Orders + shipping tracking
+    TransactionsModule, // Eco-transaction ledger + exchanges
+    MarketplaceDealsModule, // P2P cash sales + exchanges (anti-scam trust layer)
 
     // ── Queue workers ─────────────────────────────────────────────────────────
-    QueuesModule,        // BullMQ processors (payment, notifications)
+    QueuesModule, // BullMQ processors (payment, notifications)
   ],
   controllers: [HealthController],
   providers: [],
