@@ -36,7 +36,9 @@ export class MarketplaceDealsService {
     await this._assertNotBlocked(buyerId);
 
     const [product] = await this.marketplace.getPrices([productId]);
-    if (!product.isActive) throw new BadRequestError('Producto no disponible');
+    if (!product.isActive || this.marketplace.isSold(product)) {
+      throw new BadRequestError('Producto no disponible');
+    }
     if (this.marketplace.isReserved(product)) {
       throw new BadRequestError(
         'Este producto ya está reservado por otro trato',
@@ -87,7 +89,12 @@ export class MarketplaceDealsService {
         'El producto solicitado no acepta intercambios',
       );
     }
-    if (!requested.isActive || !offered.isActive) {
+    if (
+      !requested.isActive ||
+      !offered.isActive ||
+      this.marketplace.isSold(requested) ||
+      this.marketplace.isSold(offered)
+    ) {
       throw new BadRequestError('Alguno de los productos no está disponible');
     }
     if (
@@ -226,7 +233,7 @@ export class MarketplaceDealsService {
       data: { status: P2PStatus.COMPLETED, completedAt: new Date() },
     });
 
-    await this.marketplace.markProductsSold(this._itemIds(deal));
+    await this.marketplace.markProductsSold(this._itemIds(deal), deal.type);
     await this._awardPoints(deal);
     await Promise.all([
       this._bumpReputation(deal.buyerId, { completed: true }),
@@ -334,6 +341,11 @@ export class MarketplaceDealsService {
     if (overdue.length) {
       this.logger.log(`P2P sweep: expired ${overdue.length} overdue deal(s)`);
     }
+
+    // Same cadence: clean up products sold long enough ago (soft-delete).
+    await this.marketplace.purgeSoldProducts(
+      this.cfg<number>('soldRetentionDays'),
+    );
     return overdue.length;
   }
 

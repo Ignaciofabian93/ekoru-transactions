@@ -15,6 +15,8 @@ export interface MarketplaceProductPrice {
   isExchangeable: boolean;
   /** Set while an accepted P2P deal holds the item; in the future = reserved. */
   reservedUntil: string | null;
+  /** Set once a completed deal marked the item sold/exchanged. */
+  soldAt: string | null;
 }
 
 /**
@@ -41,6 +43,7 @@ export class MarketplaceClient {
           isActive
           isExchangeable
           reservedUntil
+          soldAt
         }
       }
     `;
@@ -68,6 +71,11 @@ export class MarketplaceClient {
     );
   }
 
+  /** True once the item has been sold/exchanged. */
+  isSold(p: Pick<MarketplaceProductPrice, 'soldAt'>): boolean {
+    return !!p.soldAt;
+  }
+
   /** Reserve items until `until` (accepted deal). Best-effort; logs on failure. */
   async reserveProducts(productIds: number[], until: Date): Promise<void> {
     await this.setAvailability(productIds, {
@@ -80,16 +88,35 @@ export class MarketplaceClient {
     await this.setAvailability(productIds, { reservedUntil: null });
   }
 
-  /** Mark items sold + remove from sale (deal completed). */
-  async markProductsSold(productIds: number[]): Promise<void> {
-    await this.setAvailability(productIds, { sold: true });
+  /** Mark items sold + remove from sale (deal completed). `via` = SALE|EXCHANGE. */
+  async markProductsSold(productIds: number[], via: string): Promise<void> {
+    await this.setAvailability(productIds, { sold: true, soldVia: via });
+  }
+
+  /**
+   * Soft-delete products sold more than `days` ago (profile cleanup). Best-effort
+   * — driven periodically by the P2P sweep worker.
+   */
+  async purgeSoldProducts(days: number): Promise<void> {
+    const secret = this.config.get<string>('internalSecret');
+    if (!secret) return;
+    const mutation = /* GraphQL */ `
+      mutation PurgeSoldProducts($days: Int!, $secret: String!) {
+        purgeSoldProducts(olderThanDays: $days, internalSecret: $secret)
+      }
+    `;
+    try {
+      await this.call(mutation, { days, secret }, secret);
+    } catch (err) {
+      this.logger.error('purgeSoldProducts failed', err);
+    }
   }
 
   // ─── helpers ──────────────────────────────────────────────────────────────
 
   private async setAvailability(
     productIds: number[],
-    change: { reservedUntil?: string | null; sold?: boolean },
+    change: { reservedUntil?: string | null; sold?: boolean; soldVia?: string },
   ): Promise<void> {
     if (productIds.length === 0) return;
     const secret = this.config.get<string>('internalSecret');
@@ -101,12 +128,14 @@ export class MarketplaceClient {
         $ids: [Int!]!
         $reservedUntil: DateTime
         $sold: Boolean
+        $soldVia: String
         $secret: String!
       ) {
         setProductAvailability(
           ids: $ids
           reservedUntil: $reservedUntil
           sold: $sold
+          soldVia: $soldVia
           internalSecret: $secret
         )
       }
@@ -119,6 +148,7 @@ export class MarketplaceClient {
           ids: productIds,
           reservedUntil: change.reservedUntil ?? null,
           sold: change.sold ?? null,
+          soldVia: change.soldVia ?? null,
           secret,
         },
         secret,

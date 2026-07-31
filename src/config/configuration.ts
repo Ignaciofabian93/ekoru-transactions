@@ -50,5 +50,8 @@ export default () => ({
       10,
     ),
     completionPoints: parseInt(process.env.P2P_COMPLETION_POINTS || '10', 10),
+    // Days a sold/exchanged product lingers in the seller's profile before the
+    // sweep soft-deletes it to free space.
+    soldRetentionDays: parseInt(process.env.P2P_SOLD_RETENTION_DAYS || '7', 10),
   },
 });
