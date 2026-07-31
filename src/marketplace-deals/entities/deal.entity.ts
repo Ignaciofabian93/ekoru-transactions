@@ -15,7 +15,10 @@ import { ProductRef } from './product-ref.entity.js';
 @ObjectType()
 @Directive('@key(fields: "id")')
 export class P2PDeal {
-  @Field(() => ID) id: number;
+  // Int (not ID) so it matches every deal mutation's `id: Int` arg and the
+  // client's numeric id — an ID here serializes as a string and fails Int
+  // coercion on accept/confirm/decline/cancel/dispute.
+  @Field(() => Int) id: number;
   @Field(() => P2PDealType) type: P2PDealType;
   @Field(() => P2PStatus) status: P2PStatus;
 
