@@ -270,7 +270,20 @@ export class MarketplaceDealsService {
     });
   }
 
-  async cancelDeal({ id, callerId }: { id: number; callerId: string }) {
+  /**
+   * Ends an open deal. `reason` carries the receiver's "reject at delivery"
+   * feedback (item not as described) — stored for the other party. No strike:
+   * inspecting and declining is legitimate. The item goes back to the market.
+   */
+  async cancelDeal({
+    id,
+    callerId,
+    reason,
+  }: {
+    id: number;
+    callerId: string;
+    reason?: string;
+  }) {
     const deal = await this._load(id);
     if (deal.buyerId !== callerId && deal.sellerId !== callerId) {
       throw new BadRequestError('No participas en este trato');
@@ -280,7 +293,7 @@ export class MarketplaceDealsService {
     }
     const updated = await this.prisma.p2PDeal.update({
       where: { id },
-      data: { status: P2PStatus.CANCELLED },
+      data: { status: P2PStatus.CANCELLED, cancelReason: reason ?? null },
     });
     if (deal.status === P2PStatus.ACCEPTED) {
       await this.marketplace.releaseProducts(this._itemIds(deal));

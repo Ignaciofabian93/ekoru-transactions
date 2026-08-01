@@ -84,8 +84,9 @@ export class MarketplaceDealsResolver {
   cancelDeal(
     @Args('id', { type: () => Int }) id: number,
     @CurrentSeller() callerId: string,
+    @Args('reason', { nullable: true }) reason?: string,
   ) {
-    return this.deals.cancelDeal({ id, callerId });
+    return this.deals.cancelDeal({ id, callerId, reason });
   }
 
   /** Admin-only: close a disputed deal. */
