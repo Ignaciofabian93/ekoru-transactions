@@ -12,6 +12,7 @@ import { PaymentsModule } from './payments/payments.module.js';
 import { OrdersModule } from './orders/orders.module.js';
 import { TransactionsModule } from './transactions/transactions.module.js';
 import { MarketplaceDealsModule } from './marketplace-deals/marketplace-deals.module.js';
+import { AdminConfigModule } from './adminConfig/index.js';
 import { QueuesModule } from './queues/queues.module.js';
 import { GraphQLJSON } from './graphql/scalars/index.js';
 import configuration from './config/configuration.js';
@@ -94,6 +95,7 @@ import { PrometheusModule } from '@willsoto/nestjs-prometheus';
     OrdersModule, // Orders + shipping tracking
     TransactionsModule, // Eco-transaction ledger + exchanges
     MarketplaceDealsModule, // P2P cash sales + exchanges (anti-scam trust layer)
+    AdminConfigModule, // Platform-admin CRUD for config tables (TransactionFee…)
 
     // ── Queue workers ─────────────────────────────────────────────────────────
     QueuesModule, // BullMQ processors (payment, notifications)
