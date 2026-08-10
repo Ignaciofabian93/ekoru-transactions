@@ -10,10 +10,82 @@ export interface MembershipCharge {
 }
 
 /**
- * Client over the users subgraph, for the subscription-payment flow. Two calls:
- *   - getMembershipCharge: price a plan before we create the platform Payment.
- *   - activateMembership: after the Payment completes, tell users to create the
- *     subscription (guarded by the shared internal secret).
+ * Notification types this service emits. A subset of the users subgraph's
+ * `NotificationType` — kept as a string union rather than imported so the two
+ * services stay independently deployable.
+ */
+export type NotificationType =
+  | 'SALE_PROPOSAL'
+  | 'EXCHANGE_PROPOSAL'
+  | 'EXCHANGE_ACCEPTED'
+  | 'EXCHANGE_DECLINED'
+  | 'EXCHANGE_COMPLETED'
+  | 'ORDER_RECEIVED'
+  | 'ORDER_CONFIRMED'
+  | 'ORDER_SHIPPED'
+  | 'ORDER_DELIVERED'
+  | 'ORDER_CANCELLED'
+  | 'PAYMENT_REFUNDED';
+
+/** Coarse lifecycle stage shown to the buyer/seller. */
+export type TransactionEmailStage =
+  | 'STARTED'
+  | 'IN_PROCESS'
+  | 'COMPLETED'
+  | 'CANCELLED'
+  | 'REFUNDED';
+
+export interface TransactionNotification {
+  type: NotificationType;
+  stage: TransactionEmailStage;
+  role: 'BUYER' | 'SELLER';
+  /** Reference shown to the user, e.g. "#1042" or "Trato #57". */
+  reference: string;
+  summary: string;
+  amount?: number | null;
+  currency?: string | null;
+  counterpartName?: string | null;
+  note?: string | null;
+  detailUrl?: string | null;
+  /** Order/deal id, for deep-linking from the in-app feed. */
+  relatedId?: string | null;
+}
+
+export interface DealOfferNotification {
+  dealKind: 'SALE' | 'EXCHANGE';
+  /**
+   * The seller who made the offer. users resolves this to a display name, so
+   * this service never fetches a profile just to address a notification.
+   */
+  actorSellerId: string;
+  requestedProductTitle: string;
+  requestedProductImage?: string | null;
+  requestedProductPrice?: number | null;
+  offeredProductTitle?: string | null;
+  offeredProductImage?: string | null;
+  offeredProductPrice?: number | null;
+  compensationAmount?: number | null;
+  compensationPaidByRecipient?: boolean;
+  currency?: string | null;
+  dealUrl?: string | null;
+  relatedId?: string | null;
+}
+
+/**
+ * Client over the users subgraph. Two families of calls:
+ *
+ *   Subscription payments
+ *     - getMembershipCharge: price a plan before we create the platform Payment.
+ *     - activateMembership: after the Payment completes, tell users to create
+ *       the subscription.
+ *
+ *   Notifications
+ *     - notifyTransaction / notifyDealOffer: report that something happened.
+ *       Both funnel into the single `emitNotification` seam; users decides
+ *       which channels fire (in-app always, email and push per
+ *       `SellerPreferences`) and owns all the copy. This service never decides
+ *       whether a notification is wanted — it only reports the event. Both are
+ *       best-effort and never throw.
  *
  * Called directly service-to-service (not through the gateway), so the internal
  * secret is sent both as the `x-internal-secret` header and the mutation arg —
@@ -87,6 +159,78 @@ export class UsersClient {
       }
     `;
     await this.call(mutation, { sellerId, points, secret }, secret);
+  }
+
+  // ─── notifications ────────────────────────────────────────────────────────
+
+  /**
+   * Tells `sellerId` how their order or deal is progressing. Returns whether
+   * the notification was recorded — `false` when users is unreachable or the
+   * account is inactive. A recorded notification always reaches the in-app
+   * feed; email and push depend on the recipient's preferences.
+   */
+  async notifyTransaction(
+    sellerId: string,
+    { type, relatedId, detailUrl, ...data }: TransactionNotification,
+  ): Promise<boolean> {
+    return this.emit({
+      sellerId,
+      type,
+      relatedId,
+      actionUrl: detailUrl,
+      data: { ...data, detailUrl },
+    });
+  }
+
+  /**
+   * Tells the owner of a product that another seller proposed a sale or an
+   * exchange. `sellerId` is the owner being notified, not the offerer.
+   */
+  async notifyDealOffer(
+    sellerId: string,
+    { dealKind, relatedId, dealUrl, ...data }: DealOfferNotification,
+  ): Promise<boolean> {
+    return this.emit({
+      sellerId,
+      type: dealKind === 'EXCHANGE' ? 'EXCHANGE_PROPOSAL' : 'SALE_PROPOSAL',
+      relatedId,
+      actionUrl: dealUrl,
+      data: { ...data, dealKind, dealUrl },
+    });
+  }
+
+  /**
+   * The one seam every notification goes through. A notification is a side
+   * effect of the caller's real work, so a failure here is logged and
+   * swallowed rather than rolling back a completed deal or order.
+   */
+  private async emit(input: {
+    sellerId: string;
+    type: NotificationType;
+    relatedId?: string | null;
+    actionUrl?: string | null;
+    data: Record<string, unknown>;
+  }): Promise<boolean> {
+    const mutation = /* GraphQL */ `
+      mutation EmitNotification(
+        $input: EmitNotificationInput!
+        $secret: String!
+      ) {
+        emitNotification(input: $input, internalSecret: $secret)
+      }
+    `;
+    try {
+      const secret = this.internalSecret();
+      const data = await this.call<{ emitNotification: number | null }>(
+        mutation,
+        { input, secret },
+        secret,
+      );
+      return data.emitNotification != null;
+    } catch (err) {
+      this.logger.error(`emitNotification(${input.type}) failed`, err);
+      return false;
+    }
   }
 
   // ─── helpers ──────────────────────────────────────────────────────────────

@@ -42,21 +42,6 @@ enum ExchangeStatus {
   CANCELLED
 }
 
-enum P2PStatus {
-  PROPOSED
-  ACCEPTED
-  COMPLETED
-  DISPUTED
-  EXPIRED
-  CANCELLED
-  DECLINED
-}
-
-enum P2PDealType {
-  SALE
-  EXCHANGE
-}
-
 enum ChileanPaymentProvider {
   KHIPU
   WEBPAY
@@ -113,6 +98,21 @@ enum ShippingStage {
   DELIVERED
   RETURNED
   CANCELED
+}
+
+enum P2PStatus {
+  PROPOSED
+  ACCEPTED
+  COMPLETED
+  DISPUTED
+  EXPIRED
+  CANCELLED
+  DECLINED
+}
+
+enum P2PDealType {
+  SALE
+  EXCHANGE
 }
 
 // ─── Models ──────────────────────────────────────────────────────────────────────
@@ -353,18 +353,23 @@ model ShippingAddress {
   @@index([countyId])
 }
 
-/// Peer-to-peer marketplace deal (cash sale or exchange). Ids reference
-/// Seller/Product without a declared FK, matching Order's projection here.
 model P2PDeal {
   id                   Int         @id @default(autoincrement())
   type                 P2PDealType
   status               P2PStatus   @default(PROPOSED)
+  /// The initiating side (buyer / the one offering to trade).
   buyerId              String
+  /// The owner of the requested item.
   sellerId             String
+  /// SALE: the item being bought.
   productId            Int?
+  /// EXCHANGE: the seller's item the buyer wants.
   requestedProductId   Int?
+  /// EXCHANGE: the buyer's item offered in trade.
   offeredProductId     Int?
+  /// EXCHANGE: cash to settle a substantial price gap (0 when even).
   compensationAmount   Int         @default(0)
+  /// EXCHANGE: who owes the compensation (the owner of the cheaper item).
   compensationPayerId  String?
   agreedAt             DateTime?
   confirmationDeadline DateTime?

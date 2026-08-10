@@ -18,6 +18,12 @@ export default () => ({
   /** Public URL of the gateway. Used to build provider return URLs. */
   gatewayBaseUrl: process.env.GATEWAY_BASE_URL,
   /**
+   * Public URL of the web app. Used to deep-link notification emails to the
+   * order or deal they describe. Optional: without it the email falls back to
+   * a generic account link.
+   */
+  webAppBaseUrl: process.env.WEB_APP_BASE_URL,
+  /**
    * The platform Seller id that owns EKORU's own ChileanPaymentConfig — the
    * receiver of subscription (and later ad) payments. Its Webpay config is what
    * charges land in.

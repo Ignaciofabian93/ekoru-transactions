@@ -16,6 +16,8 @@ export interface StoreProductPrice {
   offerPrice: number | null;
   isActive: boolean;
   stock: number;
+  /** Used to describe the order in notification emails. */
+  name: string;
 }
 
 /**
@@ -46,6 +48,7 @@ export class StoresClient {
           offerPrice
           isActive
           stock
+          name
         }
       }
     `;

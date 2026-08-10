@@ -13,6 +13,9 @@ export interface MarketplaceProductPrice {
   price: number;
   isActive: boolean;
   isExchangeable: boolean;
+  /** Name + first image, for describing the item in notification emails. */
+  name: string;
+  images: string[];
   /** Set while an accepted P2P deal holds the item; in the future = reserved. */
   reservedUntil: string | null;
   /** Set once a completed deal marked the item sold/exchanged. */
@@ -42,6 +45,8 @@ export class MarketplaceClient {
           price
           isActive
           isExchangeable
+          name
+          images
           reservedUntil
           soldAt
         }

@@ -9,11 +9,15 @@ import {
   calculatePrismaParams,
   createPaginatedResponse,
 } from '../common/utils/index.js';
+import { ConfigService } from '@nestjs/config';
 import {
   MarketplaceClient,
   StoresClient,
+  UsersClient,
   type MarketplaceProductPrice,
+  type NotificationType,
   type StoreProductPrice,
+  type TransactionEmailStage,
 } from '../common/clients/index.js';
 import { CreateOrderInput, UpdateShippingInput } from './dto/index.js';
 import {
@@ -64,6 +68,37 @@ const ADDRESS_REQUIRED = new Set<ShippingMethod>([
 ]);
 
 /**
+ * How a shipping transition reads to the buyer. Delivery is the end of the
+ * transaction; a return or cancellation ends it the other way; the rest are
+ * progress.
+ */
+const SHIPPING_STAGE_TO_EMAIL: Record<ShippingStage, TransactionEmailStage> = {
+  [ShippingStage.PREPARING]: 'IN_PROCESS',
+  [ShippingStage.SHIPPED]: 'IN_PROCESS',
+  [ShippingStage.DELIVERED]: 'COMPLETED',
+  [ShippingStage.RETURNED]: 'REFUNDED',
+  [ShippingStage.CANCELED]: 'CANCELLED',
+};
+
+/** Which notification type each shipping transition raises. */
+const SHIPPING_STAGE_TO_TYPE: Record<ShippingStage, NotificationType> = {
+  [ShippingStage.PREPARING]: 'ORDER_CONFIRMED',
+  [ShippingStage.SHIPPED]: 'ORDER_SHIPPED',
+  [ShippingStage.DELIVERED]: 'ORDER_DELIVERED',
+  [ShippingStage.RETURNED]: 'PAYMENT_REFUNDED',
+  [ShippingStage.CANCELED]: 'ORDER_CANCELLED',
+};
+
+/** Shipping detail added to the email body, since the stage alone is coarse. */
+const SHIPPING_STAGE_NOTE: Record<ShippingStage, string> = {
+  [ShippingStage.PREPARING]: 'El vendedor está preparando tu pedido',
+  [ShippingStage.SHIPPED]: 'Tu pedido va en camino',
+  [ShippingStage.DELIVERED]: 'Tu pedido fue entregado',
+  [ShippingStage.RETURNED]: 'Tu pedido fue devuelto',
+  [ShippingStage.CANCELED]: 'El envío fue cancelado',
+};
+
+/**
  * Flat-rate shipping costs in CLP for the v1 launch. Replace with a per-seller
  * shippingPolicy + carrier-quote API call once those land in the marketplace
  * subgraph. See docs/CHECKOUT.md §3.9.
@@ -84,6 +119,8 @@ export class OrdersService {
     private readonly prisma: PrismaService,
     private readonly marketplace: MarketplaceClient,
     private readonly stores: StoresClient,
+    private readonly users: UsersClient,
+    private readonly config: ConfigService,
   ) {}
 
   async getOrder(id: number) {
@@ -321,6 +358,8 @@ export class OrdersService {
         `Orden ${order.id} creada — buyer=${buyerId} seller=${sellerId} total=${total} ${input.currency}`,
       );
 
+      void this._notifyOrderParties(order.id, 'STARTED', 'ORDER_RECEIVED');
+
       return this._mapOrder(order);
     } catch (error) {
       this.logger.error('Error al crear la orden:', error);
@@ -346,6 +385,16 @@ export class OrdersService {
         where: { id: orderId },
         select: ORDER_SELECT,
       });
+
+      // DELIVERED closes the transaction for the buyer; RETURNED/CANCELED end
+      // it badly; anything else is just progress worth reporting.
+      void this._notifyOrderParties(
+        orderId,
+        SHIPPING_STAGE_TO_EMAIL[input.stage],
+        SHIPPING_STAGE_TO_TYPE[input.stage],
+        SHIPPING_STAGE_NOTE[input.stage],
+      );
+
       return this._mapOrder(updated!);
     } catch (error) {
       if (error instanceof NotFoundError) throw error;
@@ -363,6 +412,7 @@ export class OrdersService {
       where: { id: orderId },
       data: { status: OrderStatus.PAID },
     });
+    void this._notifyOrderParties(orderId, 'IN_PROCESS', 'ORDER_CONFIRMED');
   }
 
   /**
@@ -370,10 +420,127 @@ export class OrdersService {
    * Idempotent: only flips PENDING_PAYMENT → CANCELED.
    */
   async markCanceled(orderId: number) {
-    await this.prisma.order.updateMany({
+    const { count } = await this.prisma.order.updateMany({
       where: { id: orderId, status: OrderStatus.PENDING_PAYMENT },
       data: { status: OrderStatus.CANCELED },
     });
+    // Idempotent upstream, so only notify on the transition that actually
+    // happened — a repeated webhook must not re-send the email.
+    if (count > 0) {
+      void this._notifyOrderParties(orderId, 'CANCELLED', 'ORDER_CANCELLED');
+    }
+  }
+
+  // ─── notifications ────────────────────────────────────────────────────────
+
+  /**
+   * Emails buyer and seller about an order transition.
+   *
+   * Best-effort throughout: the users subgraph applies each recipient's
+   * `SellerPreferences` gate and decides whether anything is actually sent, and
+   * every failure here is swallowed — a paid order stays paid even if no email
+   * could go out.
+   */
+  private async _notifyOrderParties(
+    orderId: number,
+    stage: TransactionEmailStage,
+    type: NotificationType,
+    note?: string,
+  ): Promise<void> {
+    try {
+      const order = await this.prisma.order.findUnique({
+        where: { id: orderId },
+        select: {
+          id: true,
+          buyerId: true,
+          sellerId: true,
+          total: true,
+          currency: true,
+          orderItem: {
+            select: {
+              productId: true,
+              storeProductId: true,
+              quantity: true,
+            },
+          },
+        },
+      });
+      if (!order) return;
+
+      const shared = {
+        type,
+        stage,
+        reference: `#${order.id}`,
+        summary: await this._orderSummary(order.orderItem),
+        amount: order.total,
+        currency: order.currency,
+        note: note ?? null,
+        detailUrl: this._orderUrl(order.id),
+        relatedId: String(order.id),
+      };
+
+      await Promise.all([
+        this.users.notifyTransaction(order.buyerId, {
+          ...shared,
+          role: 'BUYER',
+        }),
+        this.users.notifyTransaction(order.sellerId, {
+          ...shared,
+          role: 'SELLER',
+        }),
+      ]);
+    } catch (err) {
+      this.logger.error(`Order ${orderId} notifications failed`, err);
+    }
+  }
+
+  /**
+   * "Chaqueta de mezclilla, Bicicleta urbana (+2)". Falls back to the line
+   * count if either products subgraph is unavailable — the notification
+   * matters more than the description in it.
+   */
+  private async _orderSummary(
+    items: Array<{
+      productId: number | null;
+      storeProductId: number | null;
+      quantity: number;
+    }>,
+  ): Promise<string> {
+    const units = items.reduce((sum, i) => sum + i.quantity, 0);
+    const fallback = `${units} ${units === 1 ? 'producto' : 'productos'}`;
+
+    const marketplaceIds = items
+      .map((i) => i.productId)
+      .filter((id): id is number => typeof id === 'number');
+    const storeIds = items
+      .map((i) => i.storeProductId)
+      .filter((id): id is number => typeof id === 'number');
+
+    try {
+      const [marketplaceProducts, storeProducts] = await Promise.all([
+        marketplaceIds.length
+          ? this.marketplace.getPrices(marketplaceIds)
+          : Promise.resolve<MarketplaceProductPrice[]>([]),
+        storeIds.length
+          ? this.stores.getPrices(storeIds)
+          : Promise.resolve<StoreProductPrice[]>([]),
+      ]);
+
+      const names = [...marketplaceProducts, ...storeProducts]
+        .map((p) => p.name)
+        .filter(Boolean);
+      if (names.length === 0) return fallback;
+      // Two names plus a count keeps subject lines and spec rows readable.
+      const shown = names.slice(0, 2).join(', ');
+      return names.length > 2 ? `${shown} (+${names.length - 2})` : shown;
+    } catch {
+      return fallback;
+    }
+  }
+
+  private _orderUrl(orderId: number): string {
+    const base = this.config.get<string>('webAppBaseUrl');
+    return base ? `${base}/account/orders/${orderId}` : '';
   }
 
   // ─── helpers ──────────────────────────────────────────────────────────────

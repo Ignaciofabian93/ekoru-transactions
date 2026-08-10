@@ -2,11 +2,30 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { NotFoundError, BadRequestError } from '../common/exceptions/index.js';
-import { MarketplaceClient, UsersClient } from '../common/clients/index.js';
+import {
+  MarketplaceClient,
+  UsersClient,
+  type MarketplaceProductPrice,
+  type NotificationType,
+  type TransactionEmailStage,
+} from '../common/clients/index.js';
 import { P2PStatus, P2PDealType, TransactionKind } from '@prisma/client';
 
 /** Deals still holding an item / awaiting completion. */
 const OPEN_STATUSES: P2PStatus[] = [P2PStatus.PROPOSED, P2PStatus.ACCEPTED];
+
+/**
+ * Deal lifecycle → notification type. The EXCHANGE_* names cover both deal
+ * kinds: they are the shared P2P states, and only the *proposal* differs
+ * between a sale and an exchange.
+ */
+const DEAL_STAGE_TO_TYPE: Record<TransactionEmailStage, NotificationType> = {
+  STARTED: 'EXCHANGE_ACCEPTED',
+  IN_PROCESS: 'EXCHANGE_ACCEPTED',
+  COMPLETED: 'EXCHANGE_COMPLETED',
+  CANCELLED: 'EXCHANGE_DECLINED',
+  REFUNDED: 'EXCHANGE_DECLINED',
+};
 
 @Injectable()
 export class MarketplaceDealsService {
@@ -49,7 +68,7 @@ export class MarketplaceDealsService {
     }
     await this._assertNoOpenDeal([productId]);
 
-    return this.prisma.p2PDeal.create({
+    const deal = await this.prisma.p2PDeal.create({
       data: {
         type: P2PDealType.SALE,
         status: P2PStatus.PROPOSED,
@@ -58,6 +77,18 @@ export class MarketplaceDealsService {
         productId,
       },
     });
+
+    void this.users.notifyDealOffer(product.sellerId, {
+      dealKind: 'SALE',
+      actorSellerId: buyerId,
+      requestedProductTitle: product.name,
+      requestedProductImage: product.images?.[0] ?? null,
+      requestedProductPrice: product.price,
+      dealUrl: this._dealUrl(deal.id),
+      relatedId: String(deal.id),
+    });
+
+    return deal;
   }
 
   async proposeExchange({
@@ -123,7 +154,7 @@ export class MarketplaceDealsService {
           ? buyerId // buyer's item is cheaper → buyer tops up
           : requested.sellerId;
 
-    return this.prisma.p2PDeal.create({
+    const deal = await this.prisma.p2PDeal.create({
       data: {
         type: P2PDealType.EXCHANGE,
         status: P2PStatus.PROPOSED,
@@ -135,6 +166,26 @@ export class MarketplaceDealsService {
         compensationPayerId,
       },
     });
+
+    void this.users.notifyDealOffer(requested.sellerId, {
+      dealKind: 'EXCHANGE',
+      actorSellerId: buyerId,
+      requestedProductTitle: requested.name,
+      requestedProductImage: requested.images?.[0] ?? null,
+      requestedProductPrice: requested.price,
+      offeredProductTitle: offered.name,
+      offeredProductImage: offered.images?.[0] ?? null,
+      offeredProductPrice: offered.price,
+      compensationAmount,
+      // The recipient is the owner of the requested item; they top up only when
+      // the payer is not the buyer who proposed the trade.
+      compensationPaidByRecipient:
+        compensationAmount > 0 && compensationPayerId === requested.sellerId,
+      dealUrl: this._dealUrl(deal.id),
+      relatedId: String(deal.id),
+    });
+
+    return deal;
   }
 
   // ─── Seller responses ─────────────────────────────────────────────────────
@@ -161,6 +212,7 @@ export class MarketplaceDealsService {
       },
     });
     await this.marketplace.reserveProducts(this._itemIds(deal), deadline);
+    void this._notifyDealParties(deal, 'STARTED');
     return updated;
   }
 
@@ -180,10 +232,13 @@ export class MarketplaceDealsService {
     if (deal.status !== P2PStatus.PROPOSED) {
       throw new BadRequestError('Este trato ya no está pendiente');
     }
-    return this.prisma.p2PDeal.update({
+    const updated = await this.prisma.p2PDeal.update({
       where: { id },
       data: { status: P2PStatus.DECLINED, cancelReason: reason },
     });
+    // Only the buyer needs telling: the seller is the one who just declined.
+    void this._notifyDealParties(deal, 'CANCELLED', reason, ['BUYER']);
+    return updated;
   }
 
   // ─── Confirmation / completion ────────────────────────────────────────────
@@ -239,6 +294,7 @@ export class MarketplaceDealsService {
       this._bumpReputation(deal.buyerId, { completed: true }),
       this._bumpReputation(deal.sellerId, { completed: true }),
     ]);
+    void this._notifyDealParties(deal, 'COMPLETED');
     return completed;
   }
 
@@ -298,6 +354,7 @@ export class MarketplaceDealsService {
     if (deal.status === P2PStatus.ACCEPTED) {
       await this.marketplace.releaseProducts(this._itemIds(deal));
     }
+    void this._notifyDealParties(deal, 'CANCELLED', reason);
     return updated;
   }
 
@@ -384,6 +441,70 @@ export class MarketplaceDealsService {
 
   async myReputation(sellerId: string) {
     return this._reputation(sellerId);
+  }
+
+  // ─── notifications ────────────────────────────────────────────────────────
+
+  /**
+   * Notifies both sides of a deal about a lifecycle change. `roles` narrows it
+   * to one side when the other just performed the action themselves.
+   *
+   * Best-effort throughout: the users subgraph decides which channels fire,
+   * and every failure below is swallowed — a deal that completed must stay
+   * completed even if nobody could be reached.
+   */
+  private async _notifyDealParties(
+    deal: DealCore,
+    stage: TransactionEmailStage,
+    note?: string | null,
+    roles: Array<'BUYER' | 'SELLER'> = ['BUYER', 'SELLER'],
+  ): Promise<void> {
+    try {
+      const summary = await this._dealSummary(deal);
+      const shared = {
+        type: DEAL_STAGE_TO_TYPE[stage],
+        stage,
+        reference: `Trato #${deal.id}`,
+        summary,
+        note: note ?? null,
+        detailUrl: this._dealUrl(deal.id),
+        relatedId: String(deal.id),
+      };
+
+      await Promise.all(
+        roles.map((role) =>
+          this.users.notifyTransaction(
+            role === 'BUYER' ? deal.buyerId : deal.sellerId,
+            { ...shared, role },
+          ),
+        ),
+      );
+    } catch (err) {
+      this.logger.error(`Deal ${deal.id} notifications failed`, err);
+    }
+  }
+
+  /** "Chaqueta de mezclilla ⇄ Bicicleta urbana", or a generic fallback. */
+  private async _dealSummary(deal: DealCore): Promise<string> {
+    const ids = this._itemIds(deal);
+    if (ids.length === 0) return `Trato #${deal.id}`;
+    try {
+      const products = await this.marketplace.getPrices(ids);
+      const byId = new Map<number, MarketplaceProductPrice>(
+        products.map((p) => [p.id, p]),
+      );
+      const names = ids.map((id) => byId.get(id)?.name).filter(Boolean);
+      if (names.length === 0) return `Trato #${deal.id}`;
+      return names.join(deal.type === P2PDealType.EXCHANGE ? ' ⇄ ' : ', ');
+    } catch {
+      // The product lookup is cosmetic — never let it block the notification.
+      return `Trato #${deal.id}`;
+    }
+  }
+
+  private _dealUrl(dealId: number): string {
+    const base = this.config.get<string>('webAppBaseUrl');
+    return base ? `${base}/account/deals/${dealId}` : '';
   }
 
   // ─── helpers ──────────────────────────────────────────────────────────────
