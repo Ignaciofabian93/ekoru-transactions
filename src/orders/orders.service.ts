@@ -475,7 +475,7 @@ export class OrdersService {
         amount: order.total,
         currency: order.currency,
         note: note ?? null,
-        detailUrl: this._orderUrl(order.id),
+        detailUrl: this._orderUrl(),
         relatedId: String(order.id),
       };
 
@@ -538,9 +538,18 @@ export class OrdersService {
     }
   }
 
-  private _orderUrl(orderId: number): string {
+  /**
+   * Deep link for the email CTA. Points at the orders list, not a per-order
+   * page: the web app has no order-detail route, so an id in the path would
+   * 404. The notification carries `relatedId` separately, so clients can route
+   * more precisely once such a page exists.
+   *
+   * Locale-less on purpose — the web app's proxy redirects `/profile/orders` to
+   * the visitor's `/{lang}/profile/orders`.
+   */
+  private _orderUrl(): string {
     const base = this.config.get<string>('webAppBaseUrl');
-    return base ? `${base}/account/orders/${orderId}` : '';
+    return base ? `${base}/profile/orders` : '';
   }
 
   // ─── helpers ──────────────────────────────────────────────────────────────

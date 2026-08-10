@@ -84,7 +84,7 @@ export class MarketplaceDealsService {
       requestedProductTitle: product.name,
       requestedProductImage: product.images?.[0] ?? null,
       requestedProductPrice: product.price,
-      dealUrl: this._dealUrl(deal.id),
+      dealUrl: this._dealUrl(),
       relatedId: String(deal.id),
     });
 
@@ -181,7 +181,7 @@ export class MarketplaceDealsService {
       // the payer is not the buyer who proposed the trade.
       compensationPaidByRecipient:
         compensationAmount > 0 && compensationPayerId === requested.sellerId,
-      dealUrl: this._dealUrl(deal.id),
+      dealUrl: this._dealUrl(),
       relatedId: String(deal.id),
     });
 
@@ -467,7 +467,7 @@ export class MarketplaceDealsService {
         reference: `Trato #${deal.id}`,
         summary,
         note: note ?? null,
-        detailUrl: this._dealUrl(deal.id),
+        detailUrl: this._dealUrl(),
         relatedId: String(deal.id),
       };
 
@@ -502,9 +502,17 @@ export class MarketplaceDealsService {
     }
   }
 
-  private _dealUrl(dealId: number): string {
+  /**
+   * Deep link for the email CTA. Points at the deals list rather than a
+   * per-deal page — the web app has no deal-detail route, so an id in the path
+   * would 404. `relatedId` on the notification still carries the deal id.
+   *
+   * Locale-less on purpose — the web app's proxy redirects `/deals` to the
+   * visitor's `/{lang}/deals`.
+   */
+  private _dealUrl(): string {
     const base = this.config.get<string>('webAppBaseUrl');
-    return base ? `${base}/account/deals/${dealId}` : '';
+    return base ? `${base}/deals` : '';
   }
 
   // ─── helpers ──────────────────────────────────────────────────────────────
