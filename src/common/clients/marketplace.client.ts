@@ -99,6 +99,79 @@ export class MarketplaceClient {
   }
 
   /**
+   * Freezes the environmental saving of a completed deal into
+   * `SellerImpactRecord`, one row per participant per item.
+   *
+   * Called at completion rather than derived later because marketplace's
+   * category weights and material composition are admin-editable — a snapshot
+   * is the only figure that stays true — and because the products themselves
+   * are purged a week later.
+   *
+   * Best-effort: a deal that completed must stay completed. Returns how many
+   * records were written (0 on failure); the mutation is idempotent, so a
+   * retry is safe.
+   */
+  async recordDealImpact(input: {
+    dealId: number;
+    kind: 'SALE' | 'EXCHANGE';
+    buyerId: string;
+    sellerId: string;
+    productId?: number | null;
+    requestedProductId?: number | null;
+    offeredProductId?: number | null;
+  }): Promise<number> {
+    const secret = this.config.get<string>('internalSecret');
+    if (!secret) {
+      this.logger.error('INTERNAL_SERVICE_SECRET no configurado');
+      return 0;
+    }
+
+    const mutation = /* GraphQL */ `
+      mutation RecordDealImpact(
+        $dealId: Int!
+        $kind: ImpactKind!
+        $buyerId: ID!
+        $sellerId: ID!
+        $productId: Int
+        $requestedProductId: Int
+        $offeredProductId: Int
+        $secret: String!
+      ) {
+        recordDealImpact(
+          dealId: $dealId
+          kind: $kind
+          buyerId: $buyerId
+          sellerId: $sellerId
+          productId: $productId
+          requestedProductId: $requestedProductId
+          offeredProductId: $offeredProductId
+          internalSecret: $secret
+        )
+      }
+    `;
+
+    try {
+      const data = await this.call<{ recordDealImpact: number }>(
+        mutation,
+        {
+          ...input,
+          productId: input.productId ?? null,
+          requestedProductId: input.requestedProductId ?? null,
+          offeredProductId: input.offeredProductId ?? null,
+          secret,
+        },
+        secret,
+      );
+      return data.recordDealImpact ?? 0;
+    } catch (err) {
+      this.logger.error(
+        `recordDealImpact for deal ${input.dealId} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 0;
+    }
+  }
+
+  /**
    * Soft-delete products sold more than `days` ago (profile cleanup). Best-effort
    * — driven periodically by the P2P sweep worker.
    */
@@ -200,7 +273,8 @@ export class MarketplaceClient {
       errors?: Array<{ message: string }>;
     };
     if (body.errors?.length) {
-      this.logger.error('Marketplace GraphQL errors', body.errors);
+      const messages = body.errors.map((e) => e.message).join(' | ');
+      this.logger.error(`Marketplace GraphQL errors: ${messages}`);
       throw new InternalServerError(body.errors[0].message);
     }
     if (!body.data) throw new InternalServerError('Marketplace devolvió vacío');

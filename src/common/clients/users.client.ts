@@ -228,7 +228,9 @@ export class UsersClient {
       );
       return data.emitNotification != null;
     } catch (err) {
-      this.logger.error(`emitNotification(${input.type}) failed`, err);
+      this.logger.error(
+        `emitNotification(${input.type}) for seller ${input.sellerId} failed: ${reason(err)}`,
+      );
       return false;
     }
   }
@@ -262,14 +264,17 @@ export class UsersClient {
         body: JSON.stringify({ query, variables }),
       });
     } catch (err) {
-      this.logger.error('Users subgraph unreachable', err);
+      this.logger.error(`Users subgraph unreachable at ${url}: ${reason(err)}`);
       throw new InternalServerError(
         'No se pudo contactar al servicio de usuarios',
       );
     }
 
     if (!response.ok) {
-      this.logger.error(`Users returned ${response.status}`);
+      const body = await response.text().catch(() => '');
+      this.logger.error(
+        `Users returned ${response.status}: ${body || '(no body)'}`,
+      );
       throw new InternalServerError(
         'Error al consultar el servicio de usuarios',
       );
@@ -280,11 +285,17 @@ export class UsersClient {
       errors?: Array<{ message: string }>;
     };
     if (body.errors?.length) {
-      this.logger.error('Users GraphQL errors', body.errors);
+      const messages = body.errors.map((e) => e.message).join(' | ');
+      this.logger.error(`Users GraphQL errors: ${messages}`);
       throw new InternalServerError(body.errors[0].message);
     }
     if (!body.data)
       throw new InternalServerError('Users devolvió una respuesta vacía');
     return body.data;
   }
+}
+
+/** Error message on one line, so a single grep shows why a call failed. */
+function reason(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

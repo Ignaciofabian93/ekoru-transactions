@@ -288,6 +288,19 @@ export class MarketplaceDealsService {
       data: { status: P2PStatus.COMPLETED, completedAt: new Date() },
     });
 
+    // Snapshot the environmental saving BEFORE anything starts retiring the
+    // products: the figures are derived from the product's category, and the
+    // sweep deletes those products (and their images) a week from now.
+    await this.marketplace.recordDealImpact({
+      dealId: deal.id,
+      kind: deal.type === P2PDealType.EXCHANGE ? 'EXCHANGE' : 'SALE',
+      buyerId: deal.buyerId,
+      sellerId: deal.sellerId,
+      productId: deal.productId,
+      requestedProductId: deal.requestedProductId,
+      offeredProductId: deal.offeredProductId,
+    });
+
     await this.marketplace.markProductsSold(this._itemIds(deal), deal.type);
     await this._awardPoints(deal);
     await Promise.all([
