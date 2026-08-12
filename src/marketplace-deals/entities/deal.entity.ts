@@ -29,6 +29,12 @@ export class P2PDeal {
   @Field(() => Int, { nullable: true }) requestedProductId?: number | null;
   @Field(() => Int, { nullable: true }) offeredProductId?: number | null;
 
+  @Field(() => String, {
+    nullable: true,
+    description: 'Note the proposer wrote to the owner when opening the deal.',
+  })
+  message?: string | null;
+
   @Field(() => Int, {
     description: 'Cash to settle a substantial exchange price gap (0 = even).',
   })
@@ -39,6 +45,13 @@ export class P2PDeal {
     description: 'Who owes the cash compensation (owner of the cheaper item).',
   })
   compensationPayerId?: string | null;
+
+  @Field(() => Date, {
+    nullable: true,
+    description:
+      'When the party receiving the top-up confirmed the cash changed hands.',
+  })
+  compensationSettledAt?: Date | null;
 
   @Field(() => Date, { nullable: true }) agreedAt?: Date | null;
   @Field(() => Date, { nullable: true }) confirmationDeadline?: Date | null;
@@ -61,6 +74,28 @@ export class P2PDeal {
   requestedProduct?: ProductRef | null;
   @Field(() => ProductRef, { nullable: true })
   offeredProduct?: ProductRef | null;
+}
+
+/**
+ * The server-side rules of a P2P deal, published so clients can explain them
+ * before a deal exists — how big a price gap forces a cash top-up, how long the
+ * confirmation window is, and what each side earns on completion. Read-only
+ * mirror of the `p2p.*` config; never let a client compute these itself.
+ */
+@ObjectType()
+export class P2PDealSettings {
+  @Field(() => Int, {
+    description: 'Price gap (CLP) at or above which an exchange needs cash.',
+  })
+  compensationThresholdClp: number;
+
+  @Field(() => Int, { description: 'Hours both sides have to confirm.' })
+  confirmWindowHours: number;
+
+  @Field(() => Int, {
+    description: 'Eco-points each side earns on completion.',
+  })
+  completionPoints: number;
 }
 
 /** Per-seller P2P trust state (strikes, temporary block). */

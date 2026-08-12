@@ -1,15 +1,15 @@
-import { Injectable, Logger } from "@nestjs/common";
-import { PrismaService } from "../prisma/prisma.service.js";
+import { Injectable, Logger } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service.js';
 import {
   NotFoundError,
   InternalServerError,
-} from "../common/exceptions/index.js";
+} from '../common/exceptions/index.js';
 import {
   calculatePrismaParams,
   createPaginatedResponse,
-} from "../common/utils/index.js";
-import { CreateTransactionInput, CreateExchangeInput } from "./dto/index.js";
-import { TransactionKind, ExchangeStatus } from "../graphql/enums/index.js";
+} from '../common/utils/index.js';
+import { CreateTransactionInput, CreateExchangeInput } from './dto/index.js';
+import { TransactionKind, ExchangeStatus } from '../graphql/enums/index.js';
 
 const TRANSACTION_SELECT = {
   id: true,
@@ -53,13 +53,13 @@ export class TransactionsService {
         select: TRANSACTION_SELECT,
       });
 
-      if (!tx) throw new NotFoundError("Transacción no encontrada");
+      if (!tx) throw new NotFoundError('Transacción no encontrada');
 
       return { ...tx, seller: { id: tx.sellerId } };
     } catch (error) {
       if (error instanceof NotFoundError) throw error;
-      this.logger.error("Error al obtener la transacción:", error);
-      throw new InternalServerError("Error al obtener la transacción");
+      this.logger.error('Error al obtener la transacción:', error);
+      throw new InternalServerError('Error al obtener la transacción');
     }
   }
 
@@ -83,7 +83,7 @@ export class TransactionsService {
         where,
         skip,
         take,
-        orderBy: { createdAt: "desc" },
+        orderBy: { createdAt: 'desc' },
         select: TRANSACTION_SELECT,
       });
 
@@ -94,9 +94,9 @@ export class TransactionsService {
 
       return createPaginatedResponse(mapped, count, page, pageSize);
     } catch (error) {
-      this.logger.error("Error al obtener transacciones del vendedor:", error);
+      this.logger.error('Error al obtener transacciones del vendedor:', error);
       throw new InternalServerError(
-        "Error al obtener transacciones del vendedor",
+        'Error al obtener transacciones del vendedor',
       );
     }
   }
@@ -110,12 +110,12 @@ export class TransactionsService {
           feePercentage: true,
           description: true,
         },
-        orderBy: { sellerTypeFee: "asc" },
+        orderBy: { sellerTypeFee: 'asc' },
       });
     } catch (error) {
-      this.logger.error("Error al obtener las tarifas de transacción:", error);
+      this.logger.error('Error al obtener las tarifas de transacción:', error);
       throw new InternalServerError(
-        "Error al obtener las tarifas de transacción",
+        'Error al obtener las tarifas de transacción',
       );
     }
   }
@@ -138,8 +138,8 @@ export class TransactionsService {
 
       return { ...tx, seller: { id: tx.sellerId } };
     } catch (error) {
-      this.logger.error("Error al crear la transacción:", error);
-      throw new InternalServerError("Error al crear la transacción");
+      this.logger.error('Error al crear la transacción:', error);
+      throw new InternalServerError('Error al crear la transacción');
     }
   }
 
@@ -166,8 +166,8 @@ export class TransactionsService {
 
       return exchange;
     } catch (error) {
-      this.logger.error("Error al crear el intercambio:", error);
-      throw new InternalServerError("Error al crear el intercambio");
+      this.logger.error('Error al crear el intercambio:', error);
+      throw new InternalServerError('Error al crear el intercambio');
     }
   }
 
@@ -202,11 +202,11 @@ export class TransactionsService {
       return exchange;
     } catch (error) {
       this.logger.error(
-        "Error al actualizar el estado del intercambio:",
+        'Error al actualizar el estado del intercambio:',
         error,
       );
       throw new InternalServerError(
-        "Error al actualizar el estado del intercambio",
+        'Error al actualizar el estado del intercambio',
       );
     }
   }

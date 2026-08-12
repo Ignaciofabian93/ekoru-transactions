@@ -14,6 +14,9 @@ import { P2PStatus, P2PDealType, TransactionKind } from '@prisma/client';
 /** Deals still holding an item / awaiting completion. */
 const OPEN_STATUSES: P2PStatus[] = [P2PStatus.PROPOSED, P2PStatus.ACCEPTED];
 
+/** Cap on the proposer's note — it rides in emails and push payloads. */
+const MAX_MESSAGE_LENGTH = 500;
+
 /**
  * Deal lifecycle → notification type. The EXCHANGE_* names cover both deal
  * kinds: they are the shared P2P states, and only the *proposal* differs
@@ -47,9 +50,11 @@ export class MarketplaceDealsService {
   async proposeSale({
     productId,
     buyerId,
+    message,
   }: {
     productId: number;
     buyerId: string;
+    message?: string;
   }) {
     if (!buyerId) throw new BadRequestError('Debe iniciar sesión');
     await this._assertNotBlocked(buyerId);
@@ -68,6 +73,7 @@ export class MarketplaceDealsService {
     }
     await this._assertNoOpenDeal([productId]);
 
+    const note = this._sanitizeMessage(message);
     const deal = await this.prisma.p2PDeal.create({
       data: {
         type: P2PDealType.SALE,
@@ -75,6 +81,7 @@ export class MarketplaceDealsService {
         buyerId,
         sellerId: product.sellerId,
         productId,
+        message: note,
       },
     });
 
@@ -84,6 +91,7 @@ export class MarketplaceDealsService {
       requestedProductTitle: product.name,
       requestedProductImage: product.images?.[0] ?? null,
       requestedProductPrice: product.price,
+      message: note,
       dealUrl: this._dealUrl(),
       relatedId: String(deal.id),
     });
@@ -95,10 +103,12 @@ export class MarketplaceDealsService {
     requestedProductId,
     offeredProductId,
     buyerId,
+    message,
   }: {
     requestedProductId: number;
     offeredProductId: number;
     buyerId: string;
+    message?: string;
   }) {
     if (!buyerId) throw new BadRequestError('Debe iniciar sesión');
     if (requestedProductId === offeredProductId) {
@@ -154,6 +164,7 @@ export class MarketplaceDealsService {
           ? buyerId // buyer's item is cheaper → buyer tops up
           : requested.sellerId;
 
+    const note = this._sanitizeMessage(message);
     const deal = await this.prisma.p2PDeal.create({
       data: {
         type: P2PDealType.EXCHANGE,
@@ -162,6 +173,7 @@ export class MarketplaceDealsService {
         sellerId: requested.sellerId,
         requestedProductId,
         offeredProductId,
+        message: note,
         compensationAmount,
         compensationPayerId,
       },
@@ -176,6 +188,7 @@ export class MarketplaceDealsService {
       offeredProductTitle: offered.name,
       offeredProductImage: offered.images?.[0] ?? null,
       offeredProductPrice: offered.price,
+      message: note,
       compensationAmount,
       // The recipient is the owner of the requested item; they top up only when
       // the payer is not the buyer who proposed the trade.
@@ -247,10 +260,13 @@ export class MarketplaceDealsService {
     id,
     callerId,
     evidenceUrl,
+    compensationSettled,
   }: {
     id: number;
     callerId: string;
     evidenceUrl?: string;
+    /** Ticked by the party owed the cash top-up: "I received it." */
+    compensationSettled?: boolean;
   }) {
     const deal = await this._load(id);
     if (deal.status !== P2PStatus.ACCEPTED) {
@@ -269,16 +285,40 @@ export class MarketplaceDealsService {
       throw new BadRequestError('Debes subir una foto del producto recibido');
     }
 
+    // Cash gap: only the party owed the money can attest it changed hands, and
+    // they cannot close their side of the deal until they do.
+    const owedCash = this._isCashReceiver(deal, callerId);
+    if (owedCash && !deal.compensationSettledAt && !compensationSettled) {
+      throw new BadRequestError(
+        'Debes confirmar que recibiste la compensación en efectivo acordada',
+      );
+    }
+    const settledAt =
+      owedCash && compensationSettled && !deal.compensationSettledAt
+        ? new Date()
+        : undefined;
+
     const updated = await this.prisma.p2PDeal.update({
       where: { id },
-      data: isBuyer
-        ? { buyerConfirmedAt: new Date(), buyerEvidenceUrl: evidenceUrl }
-        : { sellerConfirmedAt: new Date(), sellerEvidenceUrl: evidenceUrl },
+      data: {
+        ...(settledAt ? { compensationSettledAt: settledAt } : {}),
+        ...(isBuyer
+          ? { buyerConfirmedAt: new Date(), buyerEvidenceUrl: evidenceUrl }
+          : { sellerConfirmedAt: new Date(), sellerEvidenceUrl: evidenceUrl }),
+      },
     });
 
     if (updated.buyerConfirmedAt && updated.sellerConfirmedAt) {
       return this._completeDeal(updated);
     }
+    // Half-done: nudge the other side, whose confirmation is now the only
+    // thing between them and the eco-points.
+    void this._notifyDealParties(
+      updated,
+      'IN_PROCESS',
+      'La otra parte ya confirmó. Confirma tú para cerrar el trato y recibir tus eco-puntos.',
+      [isBuyer ? 'SELLER' : 'BUYER'],
+    );
     return updated;
   }
 
@@ -329,7 +369,7 @@ export class MarketplaceDealsService {
     if (deal.status !== P2PStatus.ACCEPTED) {
       throw new BadRequestError('Solo un trato en curso puede disputarse');
     }
-    return this.prisma.p2PDeal.update({
+    const updated = await this.prisma.p2PDeal.update({
       where: { id },
       data: {
         status: P2PStatus.DISPUTED,
@@ -337,6 +377,11 @@ export class MarketplaceDealsService {
         disputeReason: reason,
       },
     });
+    // Only the other side needs telling — the caller just raised it.
+    void this._notifyDealParties(deal, 'CANCELLED', reason, [
+      deal.buyerId === callerId ? 'SELLER' : 'BUYER',
+    ]);
+    return updated;
   }
 
   /**
@@ -456,6 +501,15 @@ export class MarketplaceDealsService {
     return this._reputation(sellerId);
   }
 
+  /** The deal rules a client needs to explain a proposal before sending it. */
+  dealSettings() {
+    return {
+      compensationThresholdClp: this.cfg<number>('compensationThresholdClp'),
+      confirmWindowHours: this.cfg<number>('confirmWindowHours'),
+      completionPoints: this.cfg<number>('completionPoints'),
+    };
+  }
+
   // ─── notifications ────────────────────────────────────────────────────────
 
   /**
@@ -534,6 +588,25 @@ export class MarketplaceDealsService {
     const deal = await this.prisma.p2PDeal.findUnique({ where: { id } });
     if (!deal) throw new NotFoundError('Trato no encontrado');
     return deal;
+  }
+
+  /** Trims the proposer's note and caps it; empty notes are stored as null. */
+  private _sanitizeMessage(message?: string | null): string | null {
+    const trimmed = message?.trim();
+    if (!trimmed) return null;
+    return trimmed.slice(0, MAX_MESSAGE_LENGTH);
+  }
+
+  /**
+   * True when `callerId` is the side owed the cash top-up — i.e. there is a
+   * gap to settle and they are not the one paying it.
+   */
+  private _isCashReceiver(deal: DealCore, callerId: string): boolean {
+    return (
+      deal.compensationAmount > 0 &&
+      deal.compensationPayerId != null &&
+      deal.compensationPayerId !== callerId
+    );
   }
 
   /** SALE → [productId]; EXCHANGE → [requested, offered]. */
@@ -660,6 +733,9 @@ interface DealCore {
   productId: number | null;
   requestedProductId: number | null;
   offeredProductId: number | null;
+  compensationAmount: number;
+  compensationPayerId: string | null;
+  compensationSettledAt: Date | null;
   buyerConfirmedAt: Date | null;
   sellerConfirmedAt: Date | null;
 }

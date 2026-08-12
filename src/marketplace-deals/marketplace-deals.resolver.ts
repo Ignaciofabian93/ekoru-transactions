@@ -10,7 +10,12 @@ import {
 } from '@nestjs/graphql';
 import { UnauthorizedException } from '@nestjs/common';
 import { MarketplaceDealsService } from './marketplace-deals.service.js';
-import { P2PDeal, P2PReputation, ProductRef } from './entities/index.js';
+import {
+  P2PDeal,
+  P2PDealSettings,
+  P2PReputation,
+  ProductRef,
+} from './entities/index.js';
 import { Seller } from '../common/entities/index.js';
 import { CurrentSeller, CurrentAdmin } from '../common/decorators/index.js';
 
@@ -24,8 +29,9 @@ export class MarketplaceDealsResolver {
   proposeSaleDeal(
     @Args('productId', { type: () => Int }) productId: number,
     @CurrentSeller() buyerId: string,
+    @Args('message', { nullable: true }) message?: string,
   ) {
-    return this.deals.proposeSale({ productId, buyerId });
+    return this.deals.proposeSale({ productId, buyerId, message });
   }
 
   @Mutation(() => P2PDeal, { name: 'proposeExchangeDeal' })
@@ -33,11 +39,13 @@ export class MarketplaceDealsResolver {
     @Args('requestedProductId', { type: () => Int }) requestedProductId: number,
     @Args('offeredProductId', { type: () => Int }) offeredProductId: number,
     @CurrentSeller() buyerId: string,
+    @Args('message', { nullable: true }) message?: string,
   ) {
     return this.deals.proposeExchange({
       requestedProductId,
       offeredProductId,
       buyerId,
+      message,
     });
   }
 
@@ -67,8 +75,15 @@ export class MarketplaceDealsResolver {
     @Args('id', { type: () => Int }) id: number,
     @CurrentSeller() callerId: string,
     @Args('evidenceUrl', { nullable: true }) evidenceUrl?: string,
+    @Args('compensationSettled', { type: () => Boolean, nullable: true })
+    compensationSettled?: boolean,
   ) {
-    return this.deals.confirmDeal({ id, callerId, evidenceUrl });
+    return this.deals.confirmDeal({
+      id,
+      callerId,
+      evidenceUrl,
+      compensationSettled,
+    });
   }
 
   @Mutation(() => P2PDeal, { name: 'disputeDeal' })
@@ -126,6 +141,12 @@ export class MarketplaceDealsResolver {
   @Query(() => P2PReputation, { name: 'myP2PReputation' })
   myP2PReputation(@CurrentSeller() sellerId: string) {
     return this.deals.myReputation(sellerId);
+  }
+
+  /** Public: the deal rules, so a client can explain them before proposing. */
+  @Query(() => P2PDealSettings, { name: 'p2pDealSettings' })
+  p2pDealSettings() {
+    return this.deals.dealSettings();
   }
 
   // ─── Federation refs ──────────────────────────────────────────────────────

@@ -64,6 +64,8 @@ export interface DealOfferNotification {
   offeredProductTitle?: string | null;
   offeredProductImage?: string | null;
   offeredProductPrice?: number | null;
+  /** Free-text note the proposer wrote for the owner. */
+  message?: string | null;
   compensationAmount?: number | null;
   compensationPaidByRecipient?: boolean;
   currency?: string | null;

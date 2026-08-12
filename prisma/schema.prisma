@@ -354,35 +354,40 @@ model ShippingAddress {
 }
 
 model P2PDeal {
-  id                   Int         @id @default(autoincrement())
-  type                 P2PDealType
-  status               P2PStatus   @default(PROPOSED)
+  id                    Int         @id @default(autoincrement())
+  type                  P2PDealType
+  status                P2PStatus   @default(PROPOSED)
   /// The initiating side (buyer / the one offering to trade).
-  buyerId              String
+  buyerId               String
   /// The owner of the requested item.
-  sellerId             String
+  sellerId              String
   /// SALE: the item being bought.
-  productId            Int?
+  productId             Int?
   /// EXCHANGE: the seller's item the buyer wants.
-  requestedProductId   Int?
+  requestedProductId    Int?
   /// EXCHANGE: the buyer's item offered in trade.
-  offeredProductId     Int?
+  offeredProductId      Int?
+  /// Free-text note the proposer wrote for the owner when opening the deal.
+  message               String?
   /// EXCHANGE: cash to settle a substantial price gap (0 when even).
-  compensationAmount   Int         @default(0)
+  compensationAmount    Int         @default(0)
   /// EXCHANGE: who owes the compensation (the owner of the cheaper item).
-  compensationPayerId  String?
-  agreedAt             DateTime?
-  confirmationDeadline DateTime?
-  buyerConfirmedAt     DateTime?
-  sellerConfirmedAt    DateTime?
-  buyerEvidenceUrl     String?
-  sellerEvidenceUrl    String?
-  completedAt          DateTime?
-  disputedAt           DateTime?
-  disputeReason        String?
-  cancelReason         String?
-  createdAt            DateTime    @default(now())
-  updatedAt            DateTime    @updatedAt
+  compensationPayerId   String?
+  /// Set when the party receiving the cash top-up confirms they got it.
+  /// Required before a deal with a compensation can complete.
+  compensationSettledAt DateTime?
+  agreedAt              DateTime?
+  confirmationDeadline  DateTime?
+  buyerConfirmedAt      DateTime?
+  sellerConfirmedAt     DateTime?
+  buyerEvidenceUrl      String?
+  sellerEvidenceUrl     String?
+  completedAt           DateTime?
+  disputedAt            DateTime?
+  disputeReason         String?
+  cancelReason          String?
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
 
   @@index([sellerId, status])
   @@index([buyerId, status])
