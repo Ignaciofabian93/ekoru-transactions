@@ -10,13 +10,8 @@ import {
 } from '@nestjs/graphql';
 import { UnauthorizedException } from '@nestjs/common';
 import { MarketplaceDealsService } from './marketplace-deals.service.js';
-import {
-  P2PDeal,
-  P2PDealSettings,
-  P2PReputation,
-  ProductRef,
-} from './entities/index.js';
-import { Seller } from '../common/entities/index.js';
+import { P2PDeal, P2PDealSettings, P2PReputation } from './entities/index.js';
+import { Seller, ProductRef } from '../common/entities/index.js';
 import { CurrentSeller, CurrentAdmin } from '../common/decorators/index.js';
 
 @Resolver(() => P2PDeal)

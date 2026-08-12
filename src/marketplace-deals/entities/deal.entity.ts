@@ -1,7 +1,6 @@
 import { ObjectType, Field, ID, Int, Directive } from '@nestjs/graphql';
 import { P2PStatus, P2PDealType } from '../../graphql/enums/index.js';
-import { Seller } from '../../common/entities/index.js';
-import { ProductRef } from './product-ref.entity.js';
+import { Seller, ProductRef } from '../../common/entities/index.js';
 
 /**
  * A peer-to-peer marketplace deal — a cash sale or an exchange between two

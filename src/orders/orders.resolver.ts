@@ -1,8 +1,18 @@
-import { Resolver, Query, Mutation, Args, Int, ID } from '@nestjs/graphql';
+import {
+  Resolver,
+  Query,
+  Mutation,
+  Args,
+  Int,
+  ID,
+  ResolveField,
+  Parent,
+} from '@nestjs/graphql';
 import { OrdersService } from './orders.service.js';
-import { Order, OrderConnection } from './entities/index.js';
+import { Order, OrderConnection, OrderItem } from './entities/index.js';
 import { CreateOrderInput, UpdateShippingInput } from './dto/index.js';
 import { CurrentSeller } from '../common/decorators/index.js';
+import { ProductRef, StoreProductRef } from '../common/entities/index.js';
 
 @Resolver(() => Order)
 export class OrdersResolver {
@@ -52,5 +62,23 @@ export class OrdersResolver {
   @Mutation(() => Order)
   async updateShipping(@Args('input') input: UpdateShippingInput) {
     return this.ordersService.updateShipping(input);
+  }
+}
+
+/**
+ * Turns the stored catalogue ids into federation refs, so a client can pull the
+ * product name and images off an order line in the same round trip. Same shape
+ * as the deal refs in `marketplace-deals.resolver.ts`.
+ */
+@Resolver(() => OrderItem)
+export class OrderItemResolver {
+  @ResolveField(() => ProductRef, { nullable: true })
+  product(@Parent() item: OrderItem): ProductRef | null {
+    return item.productId != null ? { id: item.productId } : null;
+  }
+
+  @ResolveField(() => StoreProductRef, { nullable: true })
+  storeProduct(@Parent() item: OrderItem): StoreProductRef | null {
+    return item.storeProductId != null ? { id: item.storeProductId } : null;
   }
 }
