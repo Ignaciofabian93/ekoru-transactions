@@ -108,7 +108,9 @@ export class KhipuAdapter implements ProviderAdapter {
     };
   }
 
-  async handleWebhook(payload: Record<string, unknown>): Promise<ConfirmPaymentResult> {
+  async handleWebhook(
+    payload: Record<string, unknown>,
+  ): Promise<ConfirmPaymentResult> {
     // Khipu v3 webhook body shape (simplified):
     //   { payment_id, status, transaction_id, amount, ... }
     const status = payload.status as string | undefined;
@@ -125,8 +127,11 @@ export class KhipuAdapter implements ProviderAdapter {
 
   /**
    * Verifies the `x-khipu-signature` header against the raw request body.
-   * Called from the gateway webhook handler before invoking `handleWebhook`.
-   * Returns `true` only on a constant-time match.
+   *
+   * Called by `PaymentsService.handleProviderWebhook`, after the payment
+   * lookup has resolved which seller's `secretKey` applies — the gateway
+   * cannot do this, because at that point the seller is unknown. Returns
+   * `true` only on a constant-time match.
    */
   verifySignature(
     rawBody: string,

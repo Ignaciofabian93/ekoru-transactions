@@ -20,6 +20,12 @@ RUN npm run build
 # Production stage
 FROM node:22-alpine
 
+# Marks this as an optimized runtime build (Express/library fast paths, no
+# dev-only work). It is NOT how staging and production are told apart — the
+# same image build serves both. That distinction is ENVIRONMENT, which comes
+# from the compose env_file (.env.staging / .env.prod).
+ENV NODE_ENV=production
+
 # Install OpenSSL for Prisma
 RUN apk add --no-cache openssl
 

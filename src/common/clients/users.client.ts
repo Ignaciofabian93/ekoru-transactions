@@ -89,9 +89,10 @@ export interface DealOfferNotification {
  *       whether a notification is wanted — it only reports the event. Both are
  *       best-effort and never throw.
  *
- * Called directly service-to-service (not through the gateway), so the internal
- * secret is sent both as the `x-internal-secret` header and the mutation arg —
- * the users resolver accepts either.
+ * Called directly service-to-service (not through the gateway). The internal
+ * secret travels only as the `x-internal-secret` header — the users resolver
+ * accepts nothing else, since the former mutation argument put the credential
+ * in the public schema.
  */
 @Injectable()
 export class UsersClient {
@@ -130,19 +131,17 @@ export class UsersClient {
         $sellerId: ID!
         $membershipId: Int!
         $paymentId: Int!
-        $secret: String!
       ) {
         activateMembershipSubscription(
           sellerId: $sellerId
           membershipId: $membershipId
           paymentId: $paymentId
-          internalSecret: $secret
         )
       }
     `;
     const data = await this.call<{ activateMembershipSubscription: number }>(
       mutation,
-      { ...args, secret },
+      { ...args },
       secret,
     );
     return data.activateMembershipSubscription;
@@ -152,15 +151,11 @@ export class UsersClient {
   async awardPoints(sellerId: string, points: number): Promise<void> {
     const secret = this.internalSecret();
     const mutation = /* GraphQL */ `
-      mutation AwardPoints($sellerId: ID!, $points: Int!, $secret: String!) {
-        awardPoints(
-          sellerId: $sellerId
-          points: $points
-          internalSecret: $secret
-        )
+      mutation AwardPoints($sellerId: ID!, $points: Int!) {
+        awardPoints(sellerId: $sellerId, points: $points)
       }
     `;
-    await this.call(mutation, { sellerId, points, secret }, secret);
+    await this.call(mutation, { sellerId, points }, secret);
   }
 
   // ─── notifications ────────────────────────────────────────────────────────
@@ -214,18 +209,15 @@ export class UsersClient {
     data: Record<string, unknown>;
   }): Promise<boolean> {
     const mutation = /* GraphQL */ `
-      mutation EmitNotification(
-        $input: EmitNotificationInput!
-        $secret: String!
-      ) {
-        emitNotification(input: $input, internalSecret: $secret)
+      mutation EmitNotification($input: EmitNotificationInput!) {
+        emitNotification(input: $input)
       }
     `;
     try {
       const secret = this.internalSecret();
       const data = await this.call<{ emitNotification: number | null }>(
         mutation,
-        { input, secret },
+        { input },
         secret,
       );
       return data.emitNotification != null;

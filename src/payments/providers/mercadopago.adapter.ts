@@ -56,8 +56,10 @@ export class MercadoPagoAdapter implements ProviderAdapter {
       );
     }
 
-    const sdk = (await this.loadSdk()) as any; // eslint-disable-line @typescript-eslint/no-explicit-any
-    const client = new sdk.MercadoPagoConfig({ accessToken: args.config.secretKey });
+    const sdk = await this.loadSdk();
+    const client = new sdk.MercadoPagoConfig({
+      accessToken: args.config.secretKey,
+    });
     const preference = new sdk.Preference(client);
 
     const result = (await preference.create({
@@ -118,7 +120,9 @@ export class MercadoPagoAdapter implements ProviderAdapter {
    * gateway passes the resolved status in `payload.__status` to avoid the
    * adapter having to re-resolve credentials.
    */
-  async handleWebhook(payload: Record<string, unknown>): Promise<ConfirmPaymentResult> {
+  async handleWebhook(
+    payload: Record<string, unknown>,
+  ): Promise<ConfirmPaymentResult> {
     const resolved = payload['__status'] as string | undefined;
     const status =
       resolved === 'approved'

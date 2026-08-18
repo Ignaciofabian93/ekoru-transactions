@@ -1,6 +1,4 @@
-import type {
-  PaymentRedirectUnion,
-} from '../entities/payment-redirect.entity.js';
+import type { PaymentRedirectUnion } from '../entities/payment-redirect.entity.js';
 
 export interface InitiatePaymentArgs {
   /** Internal Payment.id — used as the provider's commerce/transaction id. */
@@ -73,5 +71,21 @@ export interface ProviderAdapter {
    * the return URL as the only signal; others (Khipu, MercadoPago) also send
    * an async webhook. Adapters that don't support webhooks throw here.
    */
-  handleWebhook(payload: Record<string, unknown>): Promise<ConfirmPaymentResult>;
+  handleWebhook(
+    payload: Record<string, unknown>,
+  ): Promise<ConfirmPaymentResult>;
+  /**
+   * Verifies an inbound webhook really came from the provider, against the raw
+   * request bytes and the seller's shared secret.
+   *
+   * Optional because not every provider signs its webhooks (Webpay sends none
+   * at all). `PaymentsService._verifyWebhookSignature` decides per provider
+   * whether a missing implementation means "nothing to verify" or "reject" —
+   * it must never default to accepting.
+   */
+  verifySignature?(
+    rawBody: string,
+    signatureHeader: string,
+    secret: string,
+  ): boolean;
 }

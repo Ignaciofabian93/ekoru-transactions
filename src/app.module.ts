@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { GraphQLModule } from '@nestjs/graphql';
 import {
@@ -6,6 +7,9 @@ import {
   ApolloFederationDriverConfig,
 } from '@nestjs/apollo';
 import { BullModule } from '@nestjs/bullmq';
+import { ThrottlerModule } from '@nestjs/throttler';
+import { GqlThrottlerGuard } from './common/guards/gql-throttler.guard.js';
+import { resolveIdentity } from './common/identity.js';
 import { Request, Response } from 'express';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
@@ -35,6 +39,17 @@ import { PrometheusModule } from '@willsoto/nestjs-prometheus';
       isGlobal: true,
       load: [configuration],
     }),
+
+    // ── Rate limiting ────────────────────────────────────────────────────────
+    // 100 requests per minute per IP, matching the other subgraphs. This is a
+    // ceiling on request volume, not on the cost of any one query — the depth
+    // and complexity limits at the gateway cover that.
+    ThrottlerModule.forRoot([
+      {
+        ttl: 60000,
+        limit: 100,
+      },
+    ]),
 
     // ── BullMQ / Redis ────────────────────────────────────────────────────────
     // Configured once here; all queues & processors share this connection.
@@ -67,20 +82,22 @@ import { PrometheusModule } from '@willsoto/nestjs-prometheus';
       },
       sortSchema: true,
       resolvers: { JSON: GraphQLJSON },
-      playground: process.env.NODE_ENV !== 'production',
+      playground: process.env.ENVIRONMENT !== 'production',
       context: ({ req, res }: { req: Request; res: Response }) => ({
         req,
         res,
-        sellerId: req.headers['x-seller-id'] as string,
-        adminId: req.headers['x-admin-id'] as string,
-        token: req.headers.authorization?.replace('Bearer ', '') as string,
-        // Set by the gateway's AuthenticatedDataSource. The internal
-        // `processProviderReturn` / `processProviderWebhook` mutations use
-        // this to verify the call comes from the gateway.
+        // Identity from the verified access token, not from the unsigned
+        // `x-seller-id` / `x-admin-id` headers. See common/identity.ts.
+        ...resolveIdentity(req.headers),
+        // Set only by a direct service-to-service caller (the gateway's
+        // PaymentsService). The gateway deliberately does NOT attach this to
+        // federated requests — doing so made the internal
+        // `processProviderReturn` / `processProviderWebhook` mutations callable
+        // by any anonymous client through the public graph.
         internalSecret: req.headers['x-internal-secret'] as string | undefined,
       }),
       formatError: (error) => {
-        if (process.env.NODE_ENV === 'production') {
+        if (process.env.ENVIRONMENT === 'production') {
           delete error.extensions?.exception;
         }
         return error;
@@ -101,6 +118,6 @@ import { PrometheusModule } from '@willsoto/nestjs-prometheus';
     QueuesModule, // BullMQ processors (payment, notifications)
   ],
   controllers: [HealthController],
-  providers: [],
+  providers: [{ provide: APP_GUARD, useClass: GqlThrottlerGuard }],
 })
 export class AppModule {}

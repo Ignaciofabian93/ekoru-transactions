@@ -195,10 +195,9 @@ export class PaymentsResolver {
     provider: ChileanPaymentProvider,
     @Args('payload', { type: () => GraphQLJSON })
     payload: Record<string, unknown>,
-    @Args('internalSecret', { type: () => String }) internalSecret: string,
     @Context() ctx: { internalSecret?: string },
   ): Promise<ProviderReturnResult> {
-    this._assertInternal({ arg: internalSecret, ctx });
+    this._assertInternal(ctx);
     const result = await this.paymentsService.handleProviderReturn({
       provider,
       rawPayload: payload,
@@ -216,37 +215,43 @@ export class PaymentsResolver {
     @Args('eventType', { type: () => String }) eventType: string,
     @Args('payload', { type: () => GraphQLJSON })
     payload: Record<string, unknown>,
-    @Args('internalSecret', { type: () => String }) internalSecret: string,
     @Context() ctx: { internalSecret?: string },
+    // The exact bytes the provider signed, forwarded verbatim by the gateway.
+    // The HMAC is over these — re-serializing `payload` would change key order
+    // and whitespace and never match.
+    @Args('rawBody', { type: () => String, nullable: true })
+    rawBody?: string,
+    @Args('signature', { type: () => String, nullable: true })
+    signature?: string,
   ) {
-    this._assertInternal({ arg: internalSecret, ctx });
+    this._assertInternal(ctx);
     const result = await this.paymentsService.handleProviderWebhook({
       provider,
       eventType,
       rawPayload: payload,
+      rawBody,
+      signature,
     });
     return result.status ?? PaymentStatus.PROCESSING;
   }
 
   /**
-   * Verifies the internal shared secret. The gateway sets it on its own
-   * federation request header (e.g. `x-internal-secret`). Until that header
-   * propagates, fall back to verifying via the explicit `internalSecret`
-   * argument so dev curls work the same way.
+   * Verifies the internal shared secret, accepted **only** from the
+   * `x-internal-secret` header set by a direct service-to-service caller (the
+   * gateway's PaymentsService).
+   *
+   * There used to be an `internalSecret` GraphQL argument as a fallback "so
+   * dev curls work the same way". That put the credential in the public
+   * schema, and because the gateway attached the header to every federated
+   * request, the check passed for anonymous callers — these mutations were
+   * effectively public. Both halves are now closed.
    */
-  private _assertInternal({
-    arg,
-    ctx,
-  }: {
-    arg: string;
-    ctx: { internalSecret?: string };
-  }) {
+  private _assertInternal(ctx: { internalSecret?: string }) {
     const expected = process.env.INTERNAL_SERVICE_SECRET;
     if (!expected) {
       throw new Error('INTERNAL_SERVICE_SECRET no configurado en transactions');
     }
-    const supplied = ctx.internalSecret ?? arg;
-    if (supplied !== expected) {
+    if (!ctx.internalSecret || ctx.internalSecret !== expected) {
       throw new Error('Unauthorized');
     }
   }

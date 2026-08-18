@@ -13,8 +13,6 @@ services:
     container_name: ekoru-transactions-staging
     env_file:
       - .env.staging
-    ports:
-      - '4007:4007'
     networks:
       - ekoru-staging-network
     deploy:

@@ -135,7 +135,6 @@ export class MarketplaceClient {
         $productId: Int
         $requestedProductId: Int
         $offeredProductId: Int
-        $secret: String!
       ) {
         recordDealImpact(
           dealId: $dealId
@@ -145,7 +144,6 @@ export class MarketplaceClient {
           productId: $productId
           requestedProductId: $requestedProductId
           offeredProductId: $offeredProductId
-          internalSecret: $secret
         )
       }
     `;
@@ -158,7 +156,6 @@ export class MarketplaceClient {
           productId: input.productId ?? null,
           requestedProductId: input.requestedProductId ?? null,
           offeredProductId: input.offeredProductId ?? null,
-          secret,
         },
         secret,
       );
@@ -179,12 +176,12 @@ export class MarketplaceClient {
     const secret = this.config.get<string>('internalSecret');
     if (!secret) return;
     const mutation = /* GraphQL */ `
-      mutation PurgeSoldProducts($days: Int!, $secret: String!) {
-        purgeSoldProducts(olderThanDays: $days, internalSecret: $secret)
+      mutation PurgeSoldProducts($days: Int!) {
+        purgeSoldProducts(olderThanDays: $days)
       }
     `;
     try {
-      await this.call(mutation, { days, secret }, secret);
+      await this.call(mutation, { days }, secret);
     } catch (err) {
       this.logger.error('purgeSoldProducts failed', err);
     }
@@ -207,14 +204,12 @@ export class MarketplaceClient {
         $reservedUntil: DateTime
         $sold: Boolean
         $soldVia: String
-        $secret: String!
       ) {
         setProductAvailability(
           ids: $ids
           reservedUntil: $reservedUntil
           sold: $sold
           soldVia: $soldVia
-          internalSecret: $secret
         )
       }
     `;
@@ -227,7 +222,6 @@ export class MarketplaceClient {
           reservedUntil: change.reservedUntil ?? null,
           sold: change.sold ?? null,
           soldVia: change.soldVia ?? null,
-          secret,
         },
         secret,
       );

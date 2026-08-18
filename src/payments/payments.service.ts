@@ -612,26 +612,52 @@ export class PaymentsService {
   }
 
   /**
-   * Called by the gateway's `POST /payments/webhook/:provider` route. The
-   * gateway has already verified the provider's signature.
+   * Called by the gateway's `POST /payments/webhook/:provider` route.
+   *
+   * **This layer owns signature verification.** The gateway cannot do it: the
+   * HMAC key is the seller's `secretKey`, and which seller a webhook belongs to
+   * is only known after the payment lookup below. The gateway's handler only
+   * rejects obviously unsigned requests and forwards the raw bytes.
+   *
+   * Previously each layer's comments claimed the other one verified, and
+   * `KhipuAdapter.verifySignature` — correct code — had no callers at all, so
+   * any request with a non-empty signature header was accepted as genuine.
    */
   async handleProviderWebhook({
     provider,
     eventType,
     rawPayload,
+    rawBody,
+    signature,
   }: {
     provider: ChileanPaymentProvider;
     eventType: string;
     rawPayload: Record<string, unknown>;
+    /** Exact bytes the provider signed. The HMAC is over these, not over a re-serialization of `rawPayload`. */
+    rawBody?: string;
+    signature?: string;
   }): Promise<{ paymentId?: number; status?: PaymentStatus }> {
     const externalId = this._extractExternalId(provider, rawPayload);
     const payment = externalId
       ? await this.prisma.payment.findFirst({
           where: { externalId, paymentProvider: provider },
-          select: { id: true, orderId: true },
+          select: {
+            id: true,
+            orderId: true,
+            order: { select: { sellerId: true } },
+          },
         })
       : null;
 
+    const verified = await this._verifyWebhookSignature({
+      provider,
+      sellerId: payment?.order?.sellerId,
+      rawBody,
+      signature,
+    });
+
+    // Record the attempt either way — an unverified webhook is exactly the
+    // thing you want a trail of — but never let it change payment state.
     await this.prisma.paymentWebhook.create({
       data: {
         paymentId: payment?.id,
@@ -642,6 +668,13 @@ export class PaymentsService {
         processed: false,
       },
     });
+
+    if (!verified) {
+      this.logger.warn(
+        `Rejected ${provider} webhook for externalId ${externalId ?? 'unknown'}: signature not verified`,
+      );
+      throw new BadRequestError('Webhook signature verification failed');
+    }
 
     const adapter = this.providers.for(provider);
     const result = await adapter.handleWebhook(rawPayload);
@@ -662,6 +695,55 @@ export class PaymentsService {
   }
 
   // ─── helpers ──────────────────────────────────────────────────────────────
+
+  /**
+   * Decides whether an inbound webhook really came from the provider.
+   *
+   * Fails closed: anything missing — the raw body, the header, the payment, the
+   * seller's config, the secret — is a rejection, never a pass. A webhook we
+   * cannot attribute to a payment is one we cannot verify, and an unverifiable
+   * webhook must not be allowed to move money.
+   */
+  private async _verifyWebhookSignature({
+    provider,
+    sellerId,
+    rawBody,
+    signature,
+  }: {
+    provider: ChileanPaymentProvider;
+    sellerId?: string;
+    rawBody?: string;
+    signature?: string;
+  }): Promise<boolean> {
+    // Webpay has no async webhook at all — the buyer's return POST is the
+    // signal, and that path goes through `handleProviderReturn`, which commits
+    // against Transbank directly. Nothing to verify here.
+    if (provider === ChileanPaymentProvider.WEBPAY) return true;
+
+    // MercadoPago's `x-signature` scheme is not implemented yet (EK-1 /
+    // SEC-BACKLOG). The provider is not enabled for real sellers, so rather
+    // than silently accepting forged events, refuse them outright: if
+    // MercadoPago is switched on, this must be implemented first.
+    if (provider === ChileanPaymentProvider.MERCADOPAGO) {
+      this.logger.warn(
+        'MercadoPago webhook rejected: signature verification is not implemented',
+      );
+      return false;
+    }
+
+    if (!rawBody || !signature || !sellerId) return false;
+
+    const config = await this.prisma.chileanPaymentConfig.findUnique({
+      where: { sellerId_provider: { sellerId, provider } },
+      select: { secretKey: true, isActive: true },
+    });
+    if (!config?.isActive || !config.secretKey) return false;
+
+    const adapter = this.providers.for(provider);
+    if (typeof adapter.verifySignature !== 'function') return false;
+
+    return adapter.verifySignature(rawBody, signature, config.secretKey);
+  }
 
   /**
    * Persists the canonical PaymentStatus + flips the associated Order's
