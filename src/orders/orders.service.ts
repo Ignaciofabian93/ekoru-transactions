@@ -10,6 +10,7 @@ import {
   createPaginatedResponse,
 } from '../common/utils/index.js';
 import { ConfigService } from '@nestjs/config';
+import { OrderStatus as DbOrderStatus, TransactionKind } from '@prisma/client';
 import {
   MarketplaceClient,
   StoresClient,
@@ -394,6 +395,9 @@ export class OrdersService {
         SHIPPING_STAGE_TO_TYPE[input.stage],
         SHIPPING_STAGE_NOTE[input.stage],
       );
+      if (input.stage === ShippingStage.DELIVERED) {
+        void this._awardOrderPoints(orderId);
+      }
 
       return this._mapOrder(updated!);
     } catch (error) {
@@ -428,6 +432,92 @@ export class OrdersService {
     // happened — a repeated webhook must not re-send the email.
     if (count > 0) {
       void this._notifyOrderParties(orderId, 'CANCELLED', 'ORDER_CANCELLED');
+    }
+  }
+
+  // ─── eco-points ───────────────────────────────────────────────────────────
+
+  /**
+   * Eco-points for a delivered order (USR-6). The buyer earns STOREPURCHASE
+   * points (PURCHASE when the order holds only marketplace items) and the
+   * seller earns SELL, both read from ekoru-users' admin-editable
+   * `PointsByTransactionKind` table (raw read, the cross-subgraph convention).
+   *
+   * Only a PAID order earns anything, and only once. The ledger rows
+   * (`Transaction.notes = "order:<id>"`) are written while the order row is
+   * locked, so repeated or concurrent DELIVERED updates cannot pay twice. The
+   * points go to the order's own buyer and seller, so whoever marks it
+   * delivered cannot earn them. Best-effort like the deal points: a failure is
+   * logged and never fails the shipping update. A later return does not take
+   * the points back.
+   */
+  private async _awardOrderPoints(orderId: number): Promise<void> {
+    const reference = `order:${orderId}`;
+    try {
+      const awards = await this.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "Order" WHERE "id" = ${orderId} FOR UPDATE`;
+
+        const order = await tx.order.findUnique({
+          where: { id: orderId },
+          select: {
+            status: true,
+            buyerId: true,
+            sellerId: true,
+            orderItem: { select: { storeProductId: true } },
+          },
+        });
+        if (!order || order.status !== DbOrderStatus.PAID) return [];
+
+        const alreadyAwarded = await tx.transaction.findFirst({
+          where: { notes: reference },
+          select: { id: true },
+        });
+        if (alreadyAwarded) return [];
+
+        const buyerKind = order.orderItem.some(
+          (item) => item.storeProductId !== null,
+        )
+          ? TransactionKind.STOREPURCHASE
+          : TransactionKind.PURCHASE;
+        const config = await tx.$queryRaw<
+          { transactionKind: string; pointsAwarded: number }[]
+        >`
+          SELECT "transactionKind"::text AS "transactionKind", "pointsAwarded"
+          FROM "PointsByTransactionKind"
+          WHERE "transactionKind"::text IN (${buyerKind}, ${TransactionKind.SELL})`;
+        const pointsFor = (kind: TransactionKind) =>
+          Math.max(
+            0,
+            config.find((row) => row.transactionKind === kind)?.pointsAwarded ??
+              0,
+          );
+
+        const rows = [
+          {
+            sellerId: order.buyerId,
+            kind: buyerKind,
+            pointsCollected: pointsFor(buyerKind),
+            notes: reference,
+          },
+          {
+            sellerId: order.sellerId,
+            kind: TransactionKind.SELL,
+            pointsCollected: pointsFor(TransactionKind.SELL),
+            notes: reference,
+          },
+        ];
+        // Written even at zero points: the rows are what mark the order done.
+        await tx.transaction.createMany({ data: rows });
+        return rows.filter((row) => row.pointsCollected > 0);
+      });
+
+      await Promise.all(
+        awards.map((award) =>
+          this.users.awardPoints(award.sellerId, award.pointsCollected),
+        ),
+      );
+    } catch (error) {
+      this.logger.error(`Awarding points failed for order ${orderId}`, error);
     }
   }
 
