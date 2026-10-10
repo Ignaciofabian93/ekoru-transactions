@@ -69,6 +69,53 @@ export class MarketplaceClient {
     return products;
   }
 
+  /**
+   * The environmental saving of each listing (CO2 kg, water L), from its
+   * category's materials. Best-effort: a listing that is gone, or a marketplace
+   * outage, just yields no entry. Used for order points.
+   */
+  async getImpacts(
+    productIds: number[],
+  ): Promise<Map<number, { co2SavingsKG: number; waterSavingsLT: number }>> {
+    const impacts = new Map<
+      number,
+      { co2SavingsKG: number; waterSavingsLT: number }
+    >();
+    if (productIds.length === 0) return impacts;
+    const query = /* GraphQL */ `
+      query GetProductImpacts($ids: [Int!]!) {
+        productsByIds(ids: $ids) {
+          id
+          environmentalImpact {
+            totalCo2SavingsKG
+            totalWaterSavingsLT
+          }
+        }
+      }
+    `;
+    try {
+      const data = await this.call<{
+        productsByIds: {
+          id: number;
+          environmentalImpact: {
+            totalCo2SavingsKG: number;
+            totalWaterSavingsLT: number;
+          } | null;
+        }[];
+      }>(query, { ids: productIds });
+      for (const product of data.productsByIds ?? []) {
+        if (!product.environmentalImpact) continue;
+        impacts.set(product.id, {
+          co2SavingsKG: product.environmentalImpact.totalCo2SavingsKG,
+          waterSavingsLT: product.environmentalImpact.totalWaterSavingsLT,
+        });
+      }
+    } catch (error) {
+      this.logger.error('Product impacts unavailable', error);
+    }
+    return impacts;
+  }
+
   /** True if the item is currently held by another deal. */
   isReserved(p: Pick<MarketplaceProductPrice, 'reservedUntil'>): boolean {
     return (

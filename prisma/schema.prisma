@@ -26,6 +26,11 @@ enum TransactionKind {
   ATTENDTOEVENT
   REGISTRATION
   BONUS
+  // Points system (2026-10-09): hiring any other service, providing a service,
+  // and hosting an event people attended.
+  SERVICE
+  PROVIDESERVICE
+  ORGANIZEEVENT
 }
 
 enum SellerType {

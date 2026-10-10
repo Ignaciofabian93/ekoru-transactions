@@ -147,6 +147,49 @@ export class UsersClient {
     return data.activateMembershipSubscription;
   }
 
+  /**
+   * A completed activity earns points through the users points engine
+   * (ekoru-users docs/POINTS.md): base points for the kind plus impact points
+   * for the CO2 and water saved. Idempotent per seller + reference. Returns
+   * the points credited (0 when already paid or users is unreachable).
+   */
+  async awardActivityPoints(args: {
+    sellerId: string;
+    kind: string;
+    reference: string;
+    co2SavingsKG?: number | null;
+    waterSavingsLT?: number | null;
+  }): Promise<number> {
+    const secret = this.internalSecret();
+    const mutation = /* GraphQL */ `
+      mutation AwardActivityPoints(
+        $sellerId: ID!
+        $kind: TransactionKind!
+        $reference: String!
+        $co2SavingsKG: Float
+        $waterSavingsLT: Float
+      ) {
+        awardActivityPoints(
+          sellerId: $sellerId
+          kind: $kind
+          reference: $reference
+          co2SavingsKG: $co2SavingsKG
+          waterSavingsLT: $waterSavingsLT
+        )
+      }
+    `;
+    const data = await this.call<{ awardActivityPoints: number }>(
+      mutation,
+      {
+        ...args,
+        co2SavingsKG: args.co2SavingsKG ?? null,
+        waterSavingsLT: args.waterSavingsLT ?? null,
+      },
+      secret,
+    );
+    return data.awardActivityPoints ?? 0;
+  }
+
   /** Credits eco-points to a seller (best-effort; guarded by internal secret). */
   async awardPoints(sellerId: string, points: number): Promise<void> {
     const secret = this.internalSecret();

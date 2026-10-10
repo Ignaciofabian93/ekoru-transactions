@@ -438,84 +438,83 @@ export class OrdersService {
   // ─── eco-points ───────────────────────────────────────────────────────────
 
   /**
-   * Eco-points for a delivered order (USR-6). The buyer earns STOREPURCHASE
-   * points (PURCHASE when the order holds only marketplace items) and the
-   * seller earns SELL, both read from ekoru-users' admin-editable
-   * `PointsByTransactionKind` table (raw read, the cross-subgraph convention).
+   * Eco-points for a delivered order (ekoru-users docs/POINTS.md). The buyer
+   * earns STOREPURCHASE (PURCHASE when the order holds only marketplace items)
+   * and the seller earns SELL. Marketplace items also earn impact points for
+   * the CO2 and water a second-hand item saves. Store items earn none for now:
+   * their figures overstate the saving of a new product until decision D3.
    *
-   * Only a PAID order earns anything, and only once. The ledger rows
-   * (`Transaction.notes = "order:<id>"`) are written while the order row is
-   * locked, so repeated or concurrent DELIVERED updates cannot pay twice. The
-   * points go to the order's own buyer and seller, so whoever marks it
-   * delivered cannot earn them. Best-effort like the deal points: a failure is
-   * logged and never fails the shipping update. A later return does not take
-   * the points back.
+   * Only a PAID order earns anything. The users engine pays each seller once
+   * per `order:<id>`, so a repeated DELIVERED update pays nothing more, and
+   * the points go to the order's own buyer and seller whoever marks it
+   * delivered. Best-effort: a failure is logged and never fails the shipping
+   * update. A later return does not take the points back.
    */
   private async _awardOrderPoints(orderId: number): Promise<void> {
     const reference = `order:${orderId}`;
     try {
-      const awards = await this.prisma.$transaction(async (tx) => {
-        await tx.$queryRaw`SELECT "id" FROM "Order" WHERE "id" = ${orderId} FOR UPDATE`;
-
-        const order = await tx.order.findUnique({
-          where: { id: orderId },
-          select: {
-            status: true,
-            buyerId: true,
-            sellerId: true,
-            orderItem: { select: { storeProductId: true } },
+      const order = await this.prisma.order.findUnique({
+        where: { id: orderId },
+        select: {
+          status: true,
+          buyerId: true,
+          sellerId: true,
+          orderItem: {
+            select: { productId: true, storeProductId: true, quantity: true },
           },
-        });
-        if (!order || order.status !== DbOrderStatus.PAID) return [];
-
-        const alreadyAwarded = await tx.transaction.findFirst({
-          where: { notes: reference },
-          select: { id: true },
-        });
-        if (alreadyAwarded) return [];
-
-        const buyerKind = order.orderItem.some(
-          (item) => item.storeProductId !== null,
-        )
-          ? TransactionKind.STOREPURCHASE
-          : TransactionKind.PURCHASE;
-        const config = await tx.$queryRaw<
-          { transactionKind: string; pointsAwarded: number }[]
-        >`
-          SELECT "transactionKind"::text AS "transactionKind", "pointsAwarded"
-          FROM "PointsByTransactionKind"
-          WHERE "transactionKind"::text IN (${buyerKind}, ${TransactionKind.SELL})`;
-        const pointsFor = (kind: TransactionKind) =>
-          Math.max(
-            0,
-            config.find((row) => row.transactionKind === kind)?.pointsAwarded ??
-              0,
-          );
-
-        const rows = [
-          {
-            sellerId: order.buyerId,
-            kind: buyerKind,
-            pointsCollected: pointsFor(buyerKind),
-            notes: reference,
-          },
-          {
-            sellerId: order.sellerId,
-            kind: TransactionKind.SELL,
-            pointsCollected: pointsFor(TransactionKind.SELL),
-            notes: reference,
-          },
-        ];
-        // Written even at zero points: the rows are what mark the order done.
-        await tx.transaction.createMany({ data: rows });
-        return rows.filter((row) => row.pointsCollected > 0);
+        },
       });
+      if (!order || order.status !== DbOrderStatus.PAID) return;
 
-      await Promise.all(
+      const marketplaceItems = order.orderItem.filter(
+        (item) => item.productId !== null,
+      );
+      const impacts = await this.marketplace.getImpacts(
+        marketplaceItems.map((item) => item.productId!),
+      );
+      let co2SavingsKG = 0;
+      let waterSavingsLT = 0;
+      for (const item of marketplaceItems) {
+        const impact = impacts.get(item.productId!);
+        if (!impact) continue;
+        const quantity = Math.max(1, item.quantity ?? 1);
+        co2SavingsKG += impact.co2SavingsKG * quantity;
+        waterSavingsLT += impact.waterSavingsLT * quantity;
+      }
+
+      const buyerKind = order.orderItem.some(
+        (item) => item.storeProductId !== null,
+      )
+        ? TransactionKind.STOREPURCHASE
+        : TransactionKind.PURCHASE;
+      const awards = [
+        { sellerId: order.buyerId, kind: buyerKind },
+        { sellerId: order.sellerId, kind: TransactionKind.SELL },
+      ];
+
+      const credited = await Promise.all(
         awards.map((award) =>
-          this.users.awardPoints(award.sellerId, award.pointsCollected),
+          this.users.awardActivityPoints({
+            ...award,
+            reference,
+            co2SavingsKG,
+            waterSavingsLT,
+          }),
         ),
       );
+
+      // Keep this service's own ledger in step (it is not the source of
+      // truth any more; users' PointsAward is). Only fresh awards are
+      // written, so a repeated update adds nothing.
+      const rows = awards
+        .map((award, index) => ({
+          sellerId: award.sellerId,
+          kind: award.kind,
+          pointsCollected: credited[index],
+          notes: reference,
+        }))
+        .filter((row) => row.pointsCollected > 0);
+      if (rows.length) await this.prisma.transaction.createMany({ data: rows });
     } catch (error) {
       this.logger.error(`Awarding points failed for order ${orderId}`, error);
     }

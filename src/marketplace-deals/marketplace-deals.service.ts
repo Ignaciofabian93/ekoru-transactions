@@ -502,12 +502,32 @@ export class MarketplaceDealsService {
   }
 
   /** The deal rules a client needs to explain a proposal before sending it. */
-  dealSettings() {
+  async dealSettings() {
     return {
       compensationThresholdClp: this.cfg<number>('compensationThresholdClp'),
       confirmWindowHours: this.cfg<number>('confirmWindowHours'),
-      completionPoints: this.cfg<number>('completionPoints'),
+      completionPoints: await this._minimumDealPoints(),
     };
+  }
+
+  /**
+   * The least either party earns for a completed deal: the smallest base of
+   * the PURCHASE, SELL and EXCHANGE rules (ekoru-users
+   * `PointsByTransactionKind`, raw read). Impact points come on top. Falls
+   * back to P2P_COMPLETION_POINTS when the rules are not set.
+   */
+  private async _minimumDealPoints(): Promise<number> {
+    try {
+      const rows = await this.prisma.$queryRaw<{ min: number | null }[]>`
+        SELECT MIN("pointsAwarded") AS "min"
+        FROM "PointsByTransactionKind"
+        WHERE "transactionKind"::text IN ('PURCHASE', 'SELL', 'EXCHANGE')`;
+      const min = rows[0]?.min;
+      if (min !== null && min !== undefined) return Number(min);
+    } catch (error) {
+      this.logger.error('Points rules unavailable', error);
+    }
+    return this.cfg<number>('completionPoints');
   }
 
   // ─── notifications ────────────────────────────────────────────────────────
@@ -689,36 +709,78 @@ export class MarketplaceDealsService {
     });
   }
 
-  /** Writes the eco-transaction ledger + credits points to both parties. */
+  /**
+   * Eco-points for both parties through the users points engine (ekoru-users
+   * docs/POINTS.md): EXCHANGE for each side of a swap, PURCHASE and SELL for a
+   * sale. Each party also earns impact points for what the deal saved,
+   * read from the impact rows `recordDealImpact` froze a moment ago (in an
+   * exchange each side is credited for the item it received). Paid once per
+   * `deal:<id>`; the local ledger keeps a copy.
+   */
   private async _awardPoints(deal: DealCore): Promise<void> {
-    const points = this.cfg<number>('completionPoints');
     const isExchange = deal.type === P2PDealType.EXCHANGE;
-    const buyerKind = isExchange
-      ? TransactionKind.EXCHANGE
-      : TransactionKind.PURCHASE;
-    const sellerKind = isExchange
-      ? TransactionKind.EXCHANGE
-      : TransactionKind.SELL;
+    const awards = [
+      {
+        sellerId: deal.buyerId,
+        kind: isExchange ? TransactionKind.EXCHANGE : TransactionKind.PURCHASE,
+      },
+      {
+        sellerId: deal.sellerId,
+        kind: isExchange ? TransactionKind.EXCHANGE : TransactionKind.SELL,
+      },
+    ];
+    const reference = `deal:${deal.id}`;
 
     try {
-      await this.prisma.transaction.createMany({
-        data: [
-          { kind: buyerKind, pointsCollected: points, sellerId: deal.buyerId },
-          {
-            kind: sellerKind,
-            pointsCollected: points,
-            sellerId: deal.sellerId,
-          },
-        ],
-      });
-      await Promise.all([
-        this.users.awardPoints(deal.buyerId, points),
-        this.users.awardPoints(deal.sellerId, points),
-      ]);
+      const credited = await Promise.all(
+        awards.map(async (award) => {
+          const impact = await this._dealImpactFor(deal.id, award.sellerId);
+          return this.users.awardActivityPoints({
+            ...award,
+            reference,
+            ...impact,
+          });
+        }),
+      );
+      const rows = awards
+        .map((award, index) => ({
+          sellerId: award.sellerId,
+          kind: award.kind,
+          pointsCollected: credited[index],
+          notes: reference,
+        }))
+        .filter((row) => row.pointsCollected > 0);
+      if (rows.length) await this.prisma.transaction.createMany({ data: rows });
     } catch (err) {
       // Points are a reward, not the record of truth — never fail a completed
-      // deal because the ledger/credit hiccupped.
+      // deal because the credit hiccupped.
       this.logger.error(`Awarding points failed for deal ${deal.id}`, err);
+    }
+  }
+
+  /**
+   * What this deal saved for one participant: the sum of their
+   * `SellerImpactRecord` rows (ekoru-marketplace; raw read, the cross-subgraph
+   * convention). Zero when the impact could not be computed.
+   */
+  private async _dealImpactFor(
+    dealId: number,
+    sellerId: string,
+  ): Promise<{ co2SavingsKG: number; waterSavingsLT: number }> {
+    try {
+      const rows = await this.prisma.$queryRaw<
+        { co2: number | null; water: number | null }[]
+      >`
+        SELECT SUM("co2SavingsKG") AS "co2", SUM("waterSavingsLT") AS "water"
+        FROM "SellerImpactRecord"
+        WHERE "dealId" = ${dealId} AND "sellerId" = ${sellerId}`;
+      return {
+        co2SavingsKG: Number(rows[0]?.co2 ?? 0),
+        waterSavingsLT: Number(rows[0]?.water ?? 0),
+      };
+    } catch (error) {
+      this.logger.error(`Impact unavailable for deal ${dealId}`, error);
+      return { co2SavingsKG: 0, waterSavingsLT: 0 };
     }
   }
 }
