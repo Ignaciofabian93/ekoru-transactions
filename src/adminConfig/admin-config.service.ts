@@ -1,9 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
-import {
-  UnauthorizedError,
-  InternalServerError,
-} from '../common/exceptions/index.js';
+import { InternalServerError } from '../common/exceptions/index.js';
+import { assertAdminCan } from '../common/admin-access.js';
 import {
   pickDefined,
   requireBulkFields,
@@ -48,10 +46,6 @@ export class AdminConfigService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  private assertAdmin(adminId?: string) {
-    if (!adminId) throw new UnauthorizedError('Admins only');
-  }
-
   // ─── Transaction fees ───────────────────────────────────────────────────────
 
   async getTransactionFees() {
@@ -70,7 +64,7 @@ export class AdminConfigService {
   }
 
   async deleteTransactionFee(adminId: string | undefined, id: number) {
-    this.assertAdmin(adminId);
+    await assertAdminCan(this.prisma, adminId, 'MANAGE_SETTINGS');
     try {
       return await this.prisma.transactionFee.delete({ where: { id } });
     } catch (error) {
@@ -83,7 +77,7 @@ export class AdminConfigService {
     adminId: string | undefined,
     rows: TransactionFeeUpsertRowInput[],
   ) {
-    this.assertAdmin(adminId);
+    await assertAdminCan(this.prisma, adminId, 'MANAGE_SETTINGS');
 
     return processBulkRows(this.logger, rows, async (row) => {
       const data = pickDefined({
@@ -130,7 +124,7 @@ export class AdminConfigService {
   }
 
   async deleteShippingStatus(adminId: string | undefined, id: number) {
-    this.assertAdmin(adminId);
+    await assertAdminCan(this.prisma, adminId, 'MANAGE_ORDERS');
     try {
       return await this.prisma.shippingStatus.delete({ where: { id } });
     } catch (error) {
@@ -143,7 +137,7 @@ export class AdminConfigService {
     adminId: string | undefined,
     rows: ShippingStatusUpsertRowInput[],
   ) {
-    this.assertAdmin(adminId);
+    await assertAdminCan(this.prisma, adminId, 'MANAGE_ORDERS');
 
     return processBulkRows(this.logger, rows, async (row) => {
       const data = pickDefined({ status: row.status });
@@ -204,7 +198,7 @@ export class AdminConfigService {
   }
 
   async deleteChileanPaymentConfig(adminId: string | undefined, id: number) {
-    this.assertAdmin(adminId);
+    await assertAdminCan(this.prisma, adminId, 'MANAGE_SETTINGS');
     try {
       return await this.prisma.chileanPaymentConfig.delete({ where: { id } });
     } catch (error) {
@@ -217,7 +211,7 @@ export class AdminConfigService {
     adminId: string | undefined,
     rows: ChileanPaymentConfigUpsertRowInput[],
   ) {
-    this.assertAdmin(adminId);
+    await assertAdminCan(this.prisma, adminId, 'MANAGE_SETTINGS');
 
     return processBulkRows(this.logger, rows, async (row) => {
       // apiKey/secretKey only change when a value is provided (write-only).

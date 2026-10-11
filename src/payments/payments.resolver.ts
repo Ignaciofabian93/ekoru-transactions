@@ -6,6 +6,7 @@ import {
   Int,
   ID,
   Context,
+  Directive,
 } from '@nestjs/graphql';
 import { PaymentsService } from './payments.service.js';
 import {
@@ -27,12 +28,25 @@ import {
   ChileanPaymentProvider,
   PaymentStatus,
 } from '../graphql/enums/index.js';
-import { CurrentSeller } from '../common/decorators/index.js';
+import { CurrentAdmin, CurrentSeller } from '../common/decorators/index.js';
+import { PrismaService } from '../prisma/prisma.service.js';
+import {
+  assertAdminCan,
+  assertPartyOrAdmin,
+  sellerScope,
+} from '../common/admin-access.js';
 import { GraphQLJSON } from '../graphql/scalars/index.js';
+import { UnauthorizedError } from '../common/exceptions/index.js';
+
+/** Revenue figures are the dashboard's (VIEW_ANALYTICS) and finance's. */
+const REVENUE_PERMISSIONS = ['VIEW_ANALYTICS', 'VIEW_TRANSACTIONS'] as const;
 
 @Resolver(() => Payment)
 export class PaymentsResolver {
-  constructor(private readonly paymentsService: PaymentsService) {}
+  constructor(
+    private readonly paymentsService: PaymentsService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   // ─── Payment Config Queries ────────────────────────────────────────────────
 
@@ -40,22 +54,49 @@ export class PaymentsResolver {
     name: 'getPaymentConfig',
     nullable: true,
   })
-  async getPaymentConfig(@Args('id', { type: () => ID }) id: string) {
-    return this.paymentsService.getPaymentConfig(parseInt(id, 10));
+  async getPaymentConfig(
+    @Args('id', { type: () => ID }) id: string,
+    @CurrentSeller() sellerId?: string,
+    @CurrentAdmin() adminId?: string,
+  ) {
+    const config = await this.paymentsService.getPaymentConfig(
+      parseInt(id, 10),
+    );
+    await assertPartyOrAdmin(this.prisma, {
+      sellerId,
+      adminId,
+      parties: [config.sellerId],
+      permission: 'MANAGE_SETTINGS',
+    });
+    return config;
   }
 
+  /** A seller's own payment configs; a platform admin names the seller. */
   @Query(() => [ChileanPaymentConfig], { name: 'getPaymentConfigsBySeller' })
   async getPaymentConfigsBySeller(
-    @Args('sellerId', { type: () => ID }) sellerId: string,
+    @Args('sellerId', { type: () => ID, nullable: true }) requested?: string,
+    @CurrentSeller() sessionSellerId?: string,
+    @CurrentAdmin() adminId?: string,
   ) {
+    const sellerId = await sellerScope(this.prisma, {
+      sellerId: sessionSellerId,
+      adminId,
+      requested,
+      permission: 'MANAGE_SETTINGS',
+    });
     return this.paymentsService.getPaymentConfigsBySeller(sellerId);
   }
 
   // ─── Payment Queries ───────────────────────────────────────────────────────
 
+  /** The payer or the receiver, or a platform admin who reads payments. */
   @Query(() => Payment, { name: 'getPayment', nullable: true })
-  async getPayment(@Args('id', { type: () => ID }) id: string) {
-    return this.paymentsService.getPayment(parseInt(id, 10));
+  async getPayment(
+    @Args('id', { type: () => ID }) id: string,
+    @CurrentSeller() sellerId?: string,
+    @CurrentAdmin() adminId?: string,
+  ) {
+    return this.readPayment({ id, sellerId, adminId });
   }
 
   /**
@@ -63,18 +104,31 @@ export class PaymentsResolver {
    * the GraphQL contract reads naturally (`payment(id: ID!) { status }`).
    */
   @Query(() => Payment, { name: 'payment', nullable: true })
-  async payment(@Args('id', { type: () => ID }) id: string) {
-    return this.paymentsService.getPayment(parseInt(id, 10));
+  async payment(
+    @Args('id', { type: () => ID }) id: string,
+    @CurrentSeller() sellerId?: string,
+    @CurrentAdmin() adminId?: string,
+  ) {
+    return this.readPayment({ id, sellerId, adminId });
   }
 
+  /** Payments a seller made; a platform admin names the payer. */
   @Query(() => PaymentConnection, { name: 'getPaymentsByPayer' })
   async getPaymentsByPayer(
-    @Args('payerId', { type: () => ID }) payerId: string,
     @Args('page', { type: () => Int, defaultValue: 1 }) page: number,
     @Args('pageSize', { type: () => Int, defaultValue: 10 }) pageSize: number,
+    @Args('payerId', { type: () => ID, nullable: true }) requested?: string,
     @Args('status', { type: () => PaymentStatus, nullable: true })
     status?: PaymentStatus,
+    @CurrentSeller() sessionSellerId?: string,
+    @CurrentAdmin() adminId?: string,
   ) {
+    const payerId = await sellerScope(this.prisma, {
+      sellerId: sessionSellerId,
+      adminId,
+      requested,
+      permission: 'VIEW_TRANSACTIONS',
+    });
     return this.paymentsService.getPaymentsByPayer({
       payerId,
       page,
@@ -83,14 +137,23 @@ export class PaymentsResolver {
     });
   }
 
+  /** Payments a seller received; a platform admin names the receiver. */
   @Query(() => PaymentConnection, { name: 'getPaymentsByReceiver' })
   async getPaymentsByReceiver(
-    @Args('receiverId', { type: () => ID }) receiverId: string,
     @Args('page', { type: () => Int, defaultValue: 1 }) page: number,
     @Args('pageSize', { type: () => Int, defaultValue: 10 }) pageSize: number,
+    @Args('receiverId', { type: () => ID, nullable: true }) requested?: string,
     @Args('status', { type: () => PaymentStatus, nullable: true })
     status?: PaymentStatus,
+    @CurrentSeller() sessionSellerId?: string,
+    @CurrentAdmin() adminId?: string,
   ) {
+    const receiverId = await sellerScope(this.prisma, {
+      sellerId: sessionSellerId,
+      adminId,
+      requested,
+      permission: 'VIEW_TRANSACTIONS',
+    });
     return this.paymentsService.getPaymentsByReceiver({
       receiverId,
       page,
@@ -101,20 +164,32 @@ export class PaymentsResolver {
 
   // ─── Revenue Analytics ─────────────────────────────────────────────────────
 
+  /** Platform-wide revenue: platform admins with VIEW_ANALYTICS or VIEW_TRANSACTIONS. */
   @Query(() => RevenueStats, { name: 'getRevenueStats' })
   async getRevenueStats(
     @Args('dateFrom', { type: () => Date, nullable: true }) dateFrom?: Date,
     @Args('dateTo', { type: () => Date, nullable: true }) dateTo?: Date,
+    @CurrentAdmin() adminId?: string,
   ) {
+    await assertAdminCan(this.prisma, adminId, REVENUE_PERMISSIONS);
     return this.paymentsService.getRevenueStats({ dateFrom, dateTo });
   }
 
+  /** A seller's own revenue; a platform admin names the seller. */
   @Query(() => RevenueStats, { name: 'getSellerRevenueStats' })
   async getSellerRevenueStats(
-    @Args('sellerId', { type: () => ID }) sellerId: string,
+    @Args('sellerId', { type: () => ID, nullable: true }) requested?: string,
     @Args('dateFrom', { type: () => Date, nullable: true }) dateFrom?: Date,
     @Args('dateTo', { type: () => Date, nullable: true }) dateTo?: Date,
+    @CurrentSeller() sessionSellerId?: string,
+    @CurrentAdmin() adminId?: string,
   ) {
+    const sellerId = await sellerScope(this.prisma, {
+      sellerId: sessionSellerId,
+      adminId,
+      requested,
+      permission: REVENUE_PERMISSIONS,
+    });
     return this.paymentsService.getSellerRevenueStats({
       sellerId,
       dateFrom,
@@ -125,15 +200,25 @@ export class PaymentsResolver {
   @Query(() => [MonthlyRevenue], { name: 'getMonthlyRevenue' })
   async getMonthlyRevenue(
     @Args('months', { type: () => Int, defaultValue: 12 }) months: number,
+    @CurrentAdmin() adminId?: string,
   ) {
+    await assertAdminCan(this.prisma, adminId, REVENUE_PERMISSIONS);
     return this.paymentsService.getMonthlyRevenue(months);
   }
 
   @Query(() => [MonthlyRevenue], { name: 'getSellerMonthlyRevenue' })
   async getSellerMonthlyRevenue(
-    @Args('sellerId', { type: () => ID }) sellerId: string,
     @Args('months', { type: () => Int, defaultValue: 12 }) months: number,
+    @Args('sellerId', { type: () => ID, nullable: true }) requested?: string,
+    @CurrentSeller() sessionSellerId?: string,
+    @CurrentAdmin() adminId?: string,
   ) {
+    const sellerId = await sellerScope(this.prisma, {
+      sellerId: sessionSellerId,
+      adminId,
+      requested,
+      permission: REVENUE_PERMISSIONS,
+    });
     return this.paymentsService.getSellerMonthlyRevenue({ sellerId, months });
   }
 
@@ -178,9 +263,36 @@ export class PaymentsResolver {
     });
   }
 
+  /**
+   * Pays an accepted quotation (TRX-6). The client is the session; the amount
+   * comes from ekoru-services. Same redirect shape as createPayment.
+   */
+  @Mutation(() => CreatePaymentResult, { name: 'createQuotationPayment' })
+  async createQuotationPayment(
+    @Args('quotationId', { type: () => Int }) quotationId: number,
+    @Args('returnUrl', { type: () => String }) returnUrl: string,
+    @Args('provider', {
+      type: () => ChileanPaymentProvider,
+      defaultValue: ChileanPaymentProvider.WEBPAY,
+    })
+    provider: ChileanPaymentProvider,
+    @CurrentSeller() payerId?: string,
+  ) {
+    return this.paymentsService.createQuotationPayment({
+      quotationId,
+      returnUrl,
+      provider,
+      payerId,
+    });
+  }
+
+  /** Platform admins with PROCESS_REFUNDS (TRX-2). Capped and real. */
   @Mutation(() => PaymentRefund)
-  async refundPayment(@Args('input') input: RefundPaymentInput) {
-    return this.paymentsService.refundPayment(input);
+  async refundPayment(
+    @Args('input') input: RefundPaymentInput,
+    @CurrentAdmin() adminId?: string,
+  ) {
+    return this.paymentsService.refundPayment({ input, adminId });
   }
 
   // ─── Internal mutations (gateway → transactions) ───────────────────────────
@@ -189,6 +301,8 @@ export class PaymentsResolver {
   // and calls these mutations behind an INTERNAL_SERVICE_SECRET header. We
   // verify that header here before mutating any payment state.
 
+  // Internal: hidden from the public supergraph (GW-2); sibling services call it on this subgraph directly.
+  @Directive('@inaccessible')
   @Mutation(() => ProviderReturnResult, { name: 'processProviderReturn' })
   async processProviderReturn(
     @Args('provider', { type: () => ChileanPaymentProvider })
@@ -208,6 +322,8 @@ export class PaymentsResolver {
     return { paymentId: String(result.paymentId), status: result.status };
   }
 
+  // Internal: hidden from the public supergraph (GW-2); sibling services call it on this subgraph directly.
+  @Directive('@inaccessible')
   @Mutation(() => PaymentStatus, { name: 'processProviderWebhook' })
   async processProviderWebhook(
     @Args('provider', { type: () => ChileanPaymentProvider })
@@ -235,6 +351,25 @@ export class PaymentsResolver {
     return result.status ?? PaymentStatus.PROCESSING;
   }
 
+  private async readPayment({
+    id,
+    sellerId,
+    adminId,
+  }: {
+    id: string;
+    sellerId?: string;
+    adminId?: string;
+  }) {
+    const payment = await this.paymentsService.getPayment(parseInt(id, 10));
+    await assertPartyOrAdmin(this.prisma, {
+      sellerId,
+      adminId,
+      parties: [payment.payerId, payment.receiverId],
+      permission: ['VIEW_TRANSACTIONS', 'PROCESS_REFUNDS', 'MANAGE_ORDERS'],
+    });
+    return payment;
+  }
+
   /**
    * Verifies the internal shared secret, accepted **only** from the
    * `x-internal-secret` header set by a direct service-to-service caller (the
@@ -252,7 +387,7 @@ export class PaymentsResolver {
       throw new Error('INTERNAL_SERVICE_SECRET no configurado en transactions');
     }
     if (!ctx.internalSecret || ctx.internalSecret !== expected) {
-      throw new Error('Unauthorized');
+      throw new UnauthorizedError('Internal operation');
     }
   }
 }

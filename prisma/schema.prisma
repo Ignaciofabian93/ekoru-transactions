@@ -330,11 +330,13 @@ model OrderItem {
 }
 
 model ShippingStatus {
-  id        Int           @id @default(autoincrement())
-  status    ShippingStage @default(PREPARING)
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
-  order     Order[]
+  id           Int           @id @default(autoincrement())
+  status       ShippingStage @default(PREPARING)
+  /// Free text the seller adds when shipping: carrier and tracking number (WEB-1).
+  trackingInfo String?       @db.VarChar(200)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  order        Order[]
 }
 
 model ShippingAddress {

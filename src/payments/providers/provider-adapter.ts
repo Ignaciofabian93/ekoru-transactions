@@ -51,6 +51,26 @@ export interface ConfirmPaymentResult {
   raw: Record<string, unknown>;
 }
 
+export interface RefundArgs {
+  /** Internal Payment.id, for logs. */
+  paymentId: number;
+  externalId: string | null;
+  /** Webpay's transaction token: what its refund call is keyed on. */
+  externalToken: string | null;
+  /** Amount to give back, in the payment currency. */
+  amount: number;
+  config: InitiatePaymentArgs['config'];
+}
+
+export interface RefundResult {
+  /** The provider confirmed the money goes back. */
+  ok: boolean;
+  /** Provider reference for the refund, when it gives one. */
+  externalRefundId: string | null;
+  /** Provider's own response, kept for audit. */
+  raw: Record<string, unknown>;
+}
+
 /**
  * Common shape every payment provider implements. The service layer holds
  * one adapter per ChileanPaymentProvider value and dispatches on the enum.
@@ -88,4 +108,10 @@ export interface ProviderAdapter {
     signatureHeader: string,
     secret: string,
   ): boolean;
+  /**
+   * Gives money back on a completed payment (TRX-2). Optional: a provider
+   * without it cannot be refunded through EKORU, and the refund is marked
+   * FAILED instead of pretending.
+   */
+  refund?(args: RefundArgs): Promise<RefundResult>;
 }

@@ -8,15 +8,24 @@ import {
   ResolveField,
   Parent,
 } from '@nestjs/graphql';
-import { UnauthorizedException } from '@nestjs/common';
 import { MarketplaceDealsService } from './marketplace-deals.service.js';
+import { PrismaService } from '../prisma/prisma.service.js';
+import {
+  assertAdminCan,
+  assertPartyOrAdmin,
+  requireSeller,
+} from '../common/admin-access.js';
+import { BadRequestError, NotFoundError } from '../common/exceptions/index.js';
 import { P2PDeal, P2PDealSettings, P2PReputation } from './entities/index.js';
 import { Seller, ProductRef } from '../common/entities/index.js';
 import { CurrentSeller, CurrentAdmin } from '../common/decorators/index.js';
 
 @Resolver(() => P2PDeal)
 export class MarketplaceDealsResolver {
-  constructor(private readonly deals: MarketplaceDealsService) {}
+  constructor(
+    private readonly deals: MarketplaceDealsService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   // ─── Proposals ──────────────────────────────────────────────────────────────
 
@@ -99,43 +108,58 @@ export class MarketplaceDealsResolver {
     return this.deals.cancelDeal({ id, callerId, reason });
   }
 
-  /** Admin-only: close a disputed deal. */
+  /** Close a disputed deal: platform admins with MANAGE_ORDERS (SEC-8). */
   @Mutation(() => P2PDeal, { name: 'resolveDeal' })
-  resolveDeal(
+  async resolveDeal(
     @Args('id', { type: () => Int }) id: number,
     @Args('outcome') outcome: string,
     @CurrentAdmin() adminId: string | undefined,
     @Args('strikeSellerId', { type: () => ID, nullable: true })
     strikeSellerId?: string,
   ) {
-    if (!adminId)
-      throw new UnauthorizedException('Admin authentication required');
+    await assertAdminCan(this.prisma, adminId, 'MANAGE_ORDERS');
     if (outcome !== 'COMPLETED' && outcome !== 'CANCELLED') {
-      throw new UnauthorizedException('Invalid outcome');
+      throw new BadRequestError('Invalid outcome');
     }
     return this.deals.resolveDeal({ id, outcome, strikeSellerId });
   }
 
   // ─── Queries ──────────────────────────────────────────────────────────────
 
+  /** The deal's buyer or seller, or a platform admin who handles disputes. */
   @Query(() => P2PDeal, { name: 'deal', nullable: true })
-  deal(@Args('id', { type: () => Int }) id: number) {
-    return this.deals.getDeal(id);
+  async deal(
+    @Args('id', { type: () => Int }) id: number,
+    @CurrentSeller() sellerId?: string,
+    @CurrentAdmin() adminId?: string,
+  ) {
+    const deal = await this.deals.getDeal(id);
+    if (!deal) throw new NotFoundError('Trato no encontrado');
+    await assertPartyOrAdmin(this.prisma, {
+      sellerId,
+      adminId,
+      parties: [deal.buyerId, deal.sellerId],
+      permission: ['MANAGE_ORDERS', 'VIEW_TRANSACTIONS'],
+    });
+    return deal;
   }
+
+  // Without a session these filtered on `undefined`, which Prisma drops, so a
+  // signed-out call listed every deal on the platform.
 
   @Query(() => [P2PDeal], { name: 'myDealsAsBuyer' })
   myDealsAsBuyer(@CurrentSeller() buyerId: string) {
-    return this.deals.myDealsAsBuyer(buyerId);
+    return this.deals.myDealsAsBuyer(requireSeller(buyerId));
   }
 
   @Query(() => [P2PDeal], { name: 'myDealsAsSeller' })
   myDealsAsSeller(@CurrentSeller() sellerId: string) {
-    return this.deals.myDealsAsSeller(sellerId);
+    return this.deals.myDealsAsSeller(requireSeller(sellerId));
   }
 
   @Query(() => P2PReputation, { name: 'myP2PReputation' })
   myP2PReputation(@CurrentSeller() sellerId: string) {
-    return this.deals.myReputation(sellerId);
+    return this.deals.myReputation(requireSeller(sellerId));
   }
 
   /** Public: the deal rules, so a client can explain them before proposing. */

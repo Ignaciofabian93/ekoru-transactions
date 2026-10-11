@@ -5,7 +5,8 @@ import {
   P2pDealsProcessor,
   P2P_DEALS_QUEUE,
 } from './processors/p2p-deals.processor.js';
-import { PAYMENT_QUEUE } from '../payments/payments.service.js';
+import { PAYMENT_QUEUE } from '../payments/payment-queue.js';
+import { PaymentsModule } from '../payments/payments.module.js';
 import { PrismaModule } from '../prisma/prisma.module.js';
 import { MarketplaceDealsModule } from '../marketplace-deals/marketplace-deals.module.js';
 
@@ -23,6 +24,7 @@ import { MarketplaceDealsModule } from '../marketplace-deals/marketplace-deals.m
   imports: [
     PrismaModule,
     MarketplaceDealsModule, // P2pDealsProcessor → MarketplaceDealsService.sweep
+    PaymentsModule, // PaymentProcessor → SettlementService
     // Register the queues so the processors can attach to them
     BullModule.registerQueue({ name: PAYMENT_QUEUE }),
     BullModule.registerQueue({ name: P2P_DEALS_QUEUE }),

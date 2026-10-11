@@ -6,10 +6,9 @@ import {
   PaymentStatus as PrismaPaymentStatus,
   PaymentType as PrismaPaymentType,
 } from '@prisma/client';
-import { InjectQueue } from '@nestjs/bullmq';
-import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service.js';
-import { UsersClient } from '../common/clients/index.js';
+import { ServicesClient, UsersClient } from '../common/clients/index.js';
+import { assertAdminCan } from '../common/admin-access.js';
 import {
   NotFoundError,
   BadRequestError,
@@ -31,9 +30,20 @@ import {
 } from '../graphql/enums/index.js';
 import { OrdersService } from '../orders/orders.service.js';
 import { ProviderRegistry } from './providers/index.js';
+import { SettlementService } from './settlement.service.js';
 
-// Queue name constants – used by both service and processor
-export const PAYMENT_QUEUE = 'payments';
+// Kept as a re-export for the processor and module that import it from here.
+export { PAYMENT_QUEUE } from './payment-queue.js';
+
+/** A payment in one of these states is never committed or changed by a provider again. */
+const FINAL_PAYMENT_STATUSES: PrismaPaymentStatus[] = [
+  PrismaPaymentStatus.COMPLETED,
+  PrismaPaymentStatus.FAILED,
+  PrismaPaymentStatus.CANCELLED,
+  PrismaPaymentStatus.EXPIRED,
+  PrismaPaymentStatus.REFUNDED,
+  PrismaPaymentStatus.PARTIALLY_REFUNDED,
+];
 
 @Injectable()
 export class PaymentsService {
@@ -45,7 +55,8 @@ export class PaymentsService {
     private readonly providers: ProviderRegistry,
     private readonly users: UsersClient,
     private readonly config: ConfigService,
-    @InjectQueue(PAYMENT_QUEUE) private readonly paymentQueue: Queue,
+    private readonly settlement: SettlementService,
+    private readonly services: ServicesClient,
   ) {}
 
   // ─── Payment Config ───────────────────────────────────────────────────────
@@ -463,60 +474,148 @@ export class PaymentsService {
   }
 
   /**
-   * Refund a completed payment. Same async pattern as before — refunds
-   * happen in the BullMQ queue because they can take seconds with some
-   * providers and the user doesn't need to block on them.
+   * Pays an accepted quotation (TRX-6). The amount, client, provider and state
+   * come from ekoru-services (`finalPrice ?? estimatedPrice`), never from the
+   * client; only the quotation's client may pay it, once. The money goes to
+   * the provider's own payment config, like an order. On completion
+   * SettlementService stamps the quotation paid in services.
    */
-  async refundPayment(input: RefundPaymentInput) {
-    try {
-      const payment = await this.prisma.payment.findUnique({
-        where: { id: input.paymentId },
-        select: { id: true, amount: true, status: true, paymentProvider: true },
-      });
-      if (!payment) throw new NotFoundError('Pago no encontrado');
-      if (payment.status !== PrismaPaymentStatus.COMPLETED) {
-        throw new BadRequestError(
-          'Solo se pueden reembolsar pagos completados',
-        );
-      }
-      if (input.amount > payment.amount) {
-        throw new BadRequestError(
-          'El monto del reembolso no puede superar el monto del pago',
-        );
-      }
-      const refund = await this.prisma.paymentRefund.create({
-        data: {
-          paymentId: input.paymentId,
-          amount: input.amount,
-          reason: input.reason,
-        },
-        select: {
-          id: true,
-          paymentId: true,
-          amount: true,
-          reason: true,
-          status: true,
-          createdAt: true,
-        },
-      });
-      await this.paymentQueue.add(
-        'process-refund',
-        {
-          refundId: refund.id,
-          paymentId: input.paymentId,
-          amount: input.amount,
-          provider: payment.paymentProvider,
-        },
-        { attempts: 3, backoff: { type: 'exponential', delay: 3000 } },
-      );
-      return refund;
-    } catch (error) {
-      if (error instanceof NotFoundError || error instanceof BadRequestError) {
-        throw error;
-      }
-      this.logger.error('Error al procesar el reembolso:', error);
-      throw new InternalServerError('Error al procesar el reembolso');
+  async createQuotationPayment({
+    quotationId,
+    returnUrl,
+    provider,
+    payerId,
+  }: {
+    quotationId: number;
+    returnUrl: string;
+    provider: ChileanPaymentProvider;
+    payerId?: string;
+  }) {
+    if (!payerId) {
+      throw new BadRequestError('Debe iniciar sesión para pagar');
     }
+    const charge = await this.services.getQuotationCharge(quotationId);
+    if (charge.clientId !== payerId) {
+      throw new BadRequestError('Esta cotización no te pertenece');
+    }
+    if (charge.status !== 'ACCEPTED') {
+      throw new BadRequestError(
+        'Solo se paga una cotización aceptada (estado actual: ' +
+          charge.status +
+          ')',
+      );
+    }
+    if (charge.paid) {
+      throw new BadRequestError('Esta cotización ya está pagada');
+    }
+    if (charge.amount == null || charge.amount <= 0) {
+      throw new BadRequestError('Esta cotización no tiene un monto por pagar');
+    }
+
+    const config = await this.prisma.chileanPaymentConfig.findFirst({
+      where: { sellerId: charge.providerId, provider, isActive: true },
+    });
+    if (!config) {
+      throw new BadRequestError(
+        `El proveedor no tiene ${provider} configurado`,
+      );
+    }
+
+    const payment = await this.prisma.payment.create({
+      data: {
+        quotationId,
+        amount: charge.amount,
+        currency: charge.currency,
+        paymentProvider: provider,
+        description: `Cotización #${quotationId}`,
+        payerId,
+        receiverId: charge.providerId,
+        paymentType: PaymentType.QUOTATION,
+        chileanConfigId: config.id,
+        status: PaymentStatus.PROCESSING,
+        updatedAt: new Date(),
+      },
+      select: PAYMENT_SELECT,
+    });
+
+    const adapter = this.providers.for(provider);
+    let initiate: Awaited<ReturnType<typeof adapter.initiate>>;
+    try {
+      initiate = await adapter.initiate({
+        paymentId: payment.id,
+        // Seeds the provider's buy order; a quotation has no order.
+        orderId: quotationId,
+        amount: charge.amount,
+        currency: charge.currency,
+        description: `Cotización Ekoru #${quotationId}`,
+        returnUrl,
+        config: {
+          environment: config.environment,
+          merchantId: config.merchantId,
+          apiKey: config.apiKey,
+          secretKey: config.secretKey,
+        },
+      });
+    } catch (err) {
+      await this.prisma.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: PaymentStatus.FAILED,
+          failureReason: err instanceof Error ? err.message : 'unknown',
+        },
+      });
+      throw err;
+    }
+
+    const updated = await this.prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        externalId: initiate.externalId,
+        externalToken: initiate.externalToken,
+        updatedAt: new Date(),
+      },
+      select: PAYMENT_SELECT,
+    });
+    await this.prisma.paymentTransaction.create({
+      data: {
+        paymentId: payment.id,
+        action: 'INITIATE',
+        amount: charge.amount,
+        status: PaymentStatus.PROCESSING,
+        description: `Pago de cotización iniciado con ${provider}`,
+      },
+    });
+
+    return {
+      paymentId: String(updated.id),
+      provider,
+      status: updated.status,
+      redirect: initiate.redirect,
+      payment: this._mapPayment(updated),
+    };
+  }
+
+  /**
+   * Refunds a completed payment (TRX-2). Platform admins with PROCESS_REFUNDS
+   * only; anyone could call it before. The refund is capped at what is left
+   * to give back, and the provider is called for real in the queue
+   * (SettlementService.executeRefund); nothing is marked refunded until the
+   * provider says so.
+   */
+  async refundPayment({
+    input,
+    adminId,
+  }: {
+    input: RefundPaymentInput;
+    adminId?: string;
+  }) {
+    await assertAdminCan(this.prisma, adminId, 'PROCESS_REFUNDS');
+    return this.settlement.requestRefund({
+      paymentId: input.paymentId,
+      amount: input.amount,
+      reason: input.reason,
+      requestedBy: adminId,
+    });
   }
 
   // ─── Provider return/webhook handlers (called by gateway) ─────────────────
@@ -539,6 +638,14 @@ export class PaymentsService {
     const payment = await this._findPaymentForReturn(provider, rawPayload);
     if (!payment) {
       throw new NotFoundError('No se encontró el pago para este retorno');
+    }
+    // A buyer reloading the return page sends it again. Transbank refuses a
+    // second commit, which used to turn a COMPLETED payment into FAILED.
+    if (FINAL_PAYMENT_STATUSES.includes(payment.status)) {
+      return {
+        paymentId: payment.id,
+        status: payment.status as unknown as PaymentStatus,
+      };
     }
 
     const config = await this.prisma.chileanPaymentConfig.findUnique({
@@ -644,6 +751,7 @@ export class PaymentsService {
           select: {
             id: true,
             orderId: true,
+            status: true,
             order: { select: { sellerId: true } },
           },
         })
@@ -679,7 +787,11 @@ export class PaymentsService {
     const adapter = this.providers.for(provider);
     const result = await adapter.handleWebhook(rawPayload);
 
-    if (payment && result.status !== 'PROCESSING') {
+    if (
+      payment &&
+      result.status !== 'PROCESSING' &&
+      !FINAL_PAYMENT_STATUSES.includes(payment.status)
+    ) {
       await this._applyTerminalStatus(
         payment.id,
         payment.orderId,
@@ -782,16 +894,17 @@ export class PaymentsService {
         metadata: raw as Prisma.InputJsonValue,
       },
     });
-    if (orderId && isTerminal) {
-      if (status === PaymentStatus.COMPLETED) {
-        await this.orders.markPaid(orderId);
-      } else if (
-        status === PaymentStatus.FAILED ||
+    if (status === PaymentStatus.COMPLETED) {
+      // Order paid + stock, quotation stamped paid, duplicates refunded.
+      await this.settlement.onCompleted(paymentId);
+    } else if (
+      orderId &&
+      isTerminal &&
+      (status === PaymentStatus.FAILED ||
         status === PaymentStatus.CANCELLED ||
-        status === PaymentStatus.EXPIRED
-      ) {
-        await this.orders.markCanceled(orderId);
-      }
+        status === PaymentStatus.EXPIRED)
+    ) {
+      await this.orders.markCanceled(orderId);
     }
   }
 
@@ -835,6 +948,7 @@ export class PaymentsService {
       orderId: true,
       // Needed to activate a subscription on a completed MEMBERSHIP payment.
       paymentType: true,
+      status: true,
       payerId: true,
       metadata: true,
     } as const;
@@ -887,6 +1001,51 @@ export class PaymentsService {
           (payload['external_reference'] as string | undefined)
         );
     }
+  }
+
+  /** Any filter, for the admin payments list (TRX-11). Callers check access. */
+  async listPayments({
+    where,
+    page,
+    pageSize,
+  }: {
+    where: Prisma.PaymentWhereInput;
+    page: number;
+    pageSize: number;
+  }) {
+    const { skip, take } = calculatePrismaParams(page, pageSize);
+    const [count, payments] = await Promise.all([
+      this.prisma.payment.count({ where }),
+      this.prisma.payment.findMany({
+        where,
+        skip,
+        take,
+        orderBy: { createdAt: 'desc' },
+        select: PAYMENT_SELECT,
+      }),
+    ]);
+    return createPaginatedResponse(
+      payments.map((p) => this._mapPayment(p)),
+      count,
+      page,
+      pageSize,
+    );
+  }
+
+  /** A payment's refunds, newest first (admin payment detail). */
+  listRefunds(paymentId: number) {
+    return this.prisma.paymentRefund.findMany({
+      where: { paymentId },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        paymentId: true,
+        amount: true,
+        reason: true,
+        status: true,
+        createdAt: true,
+      },
+    });
   }
 
   private async _paginatedPayments(

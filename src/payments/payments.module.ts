@@ -4,7 +4,12 @@ import { PaymentsService, PAYMENT_QUEUE } from './payments.service.js';
 import { PaymentsResolver } from './payments.resolver.js';
 import { PrismaModule } from '../prisma/prisma.module.js';
 import { OrdersModule } from '../orders/orders.module.js';
-import { UsersClient } from '../common/clients/index.js';
+import {
+  ServicesClient,
+  StoresClient,
+  UsersClient,
+} from '../common/clients/index.js';
+import { SettlementService } from './settlement.service.js';
 import {
   ProviderRegistry,
   WebpayAdapter,
@@ -26,7 +31,10 @@ import {
     KhipuAdapter,
     MercadoPagoAdapter,
     UsersClient, // pricing + activation for subscription (platform) payments
+    SettlementService, // completion, refunds, stock, expiry
+    StoresClient, // stock after a paid or refunded order (TRX-3)
+    ServicesClient, // quotation charge and mark-paid (TRX-6)
   ],
-  exports: [PaymentsService],
+  exports: [PaymentsService, SettlementService],
 })
 export class PaymentsModule {}

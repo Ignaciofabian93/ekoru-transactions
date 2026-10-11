@@ -8,4 +8,8 @@ export class ShippingStatus {
 
   @Field(() => ShippingStage)
   status: ShippingStage;
+
+  /** Carrier and tracking number the seller added when shipping (WEB-1). */
+  @Field(() => String, { nullable: true })
+  trackingInfo?: string | null;
 }

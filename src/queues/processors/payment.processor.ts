@@ -1,296 +1,114 @@
-import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
-import { Job } from 'bullmq';
-import { PrismaService } from '../../prisma/prisma.service.js';
-import { PAYMENT_QUEUE } from '../../payments/payments.service.js';
+import {
+  Processor,
+  WorkerHost,
+  OnWorkerEvent,
+  InjectQueue,
+} from '@nestjs/bullmq';
+import { Logger, OnModuleInit } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Job, Queue } from 'bullmq';
+import { PAYMENT_JOBS, PAYMENT_QUEUE } from '../../payments/payment-queue.js';
+import { SettlementService } from '../../payments/settlement.service.js';
 
-// ─── Job payload types ────────────────────────────────────────────────────────
-
-interface InitiatePaymentJob {
-  paymentId: number;
-  provider: 'KHIPU' | 'WEBPAY';
-  amount: number;
-  currency: string;
-  description?: string;
-  payerId: string;
-  receiverId: string;
-  configId: number;
-}
-
-interface ProcessRefundJob {
+interface RefundJob {
   refundId: number;
+}
+
+interface StockJob {
+  kind: 'SALE' | 'RESTOCK';
+  orderId: number;
   paymentId: number;
-  amount: number;
-  provider: 'KHIPU' | 'WEBPAY';
 }
 
-interface ProcessWebhookJob {
-  webhookId: number;
+interface QuotationJob {
+  paymentId: number;
 }
-
-// ─── Processor ────────────────────────────────────────────────────────────────
 
 /**
  * PaymentProcessor
  * ────────────────
- * Handles all jobs in the `payments` queue. Each method handles a specific
- * job name using pattern-matched `process()` from BullMQ's WorkerHost.
+ * Consumes the `payments` queue. Every job here calls the provider or another
+ * service, so it runs with retries, and the work behind it
+ * (SettlementService) is keyed so a retry never repeats a movement.
  *
- * HOW QUEUES WORK IN THIS PROJECT
- * ────────────────────────────────
- * 1. Producer  → a Service calls `queue.add('job-name', data, options)`
- * 2. Queue     → Redis stores the job and its payload
- * 3. Worker    → this Processor picks up the job from Redis and runs `process()`
- * 4. Retries   → if `process()` throws, BullMQ retries up to `attempts` times
- *                with the configured backoff strategy
- * 5. Events    → `@OnWorkerEvent` hooks let us log completed/failed jobs
+ *   process-refund    the provider gives the money back (TRX-2)
+ *   adjust-stock      stores takes sold units out, or puts them back (TRX-3)
+ *   settle-quotation  services stamps a paid quotation (TRX-6)
+ *   expire-stale      abandoned checkouts expire (TRX-9), on a schedule
  *
- * KHIPU FLOW (Chilean bank transfers):
- *   1. POST to https://khipu.com/api/2.0/payments with receiver_id + amount
- *   2. Khipu returns { payment_id, payment_url }
- *   3. We store payment_url → client redirects there to confirm
- *   4. Khipu POSTs webhook to our URL when the transfer is confirmed
- *   5. process-webhook job updates Payment.status to COMPLETED
- *
- * WEBPAY FLOW (credit/debit cards via Transbank):
- *   1. POST to Webpay Plus API with buyOrder + amount + returnUrl
- *   2. Webpay returns { token, url } → client redirects to url?token=...
- *   3. After card entry, Webpay redirects to returnUrl?token_ws=...
- *   4. We confirm with Webpay (GET /transactions/{token})
- *   5. process-webhook job updates Payment.status accordingly
+ * The provider charge itself is synchronous (PaymentsService.createPayment):
+ * the redirect is what the buyer is waiting for. The old `initiate-payment`
+ * and `process-webhook` handlers simulated providers with fake ids and nothing
+ * enqueued them, so they are gone (TRX-14).
  */
 @Processor(PAYMENT_QUEUE)
-export class PaymentProcessor extends WorkerHost {
+export class PaymentProcessor extends WorkerHost implements OnModuleInit {
   private readonly logger = new Logger(PaymentProcessor.name);
 
-  constructor(private readonly prisma: PrismaService) {
+  constructor(
+    private readonly settlement: SettlementService,
+    private readonly config: ConfigService,
+    @InjectQueue(PAYMENT_QUEUE) private readonly queue: Queue,
+  ) {
     super();
   }
 
-  /**
-   * Entry point – BullMQ calls this for every job in the queue.
-   * We dispatch to the appropriate handler based on job.name.
-   */
+  async onModuleInit(): Promise<void> {
+    const everyMin = this.config.get<number>(
+      'payments.expireSweepEveryMin',
+      10,
+    );
+    await this.queue.add(
+      PAYMENT_JOBS.expire,
+      {},
+      {
+        repeat: { every: everyMin * 60_000 },
+        jobId: 'payments-expire-sweep', // stable id → one schedule, survives redeploys
+        removeOnComplete: true,
+        removeOnFail: 50,
+      },
+    );
+    this.logger.log(`Stale checkout sweep scheduled every ${everyMin} min`);
+  }
+
   async process(job: Job): Promise<unknown> {
     switch (job.name) {
-      case 'initiate-payment':
-        return this.initiatePayment(job as Job<InitiatePaymentJob>);
-      case 'process-refund':
-        return this.processRefund(job as Job<ProcessRefundJob>);
-      case 'process-webhook':
-        return this.processWebhook(job as Job<ProcessWebhookJob>);
+      case PAYMENT_JOBS.refund:
+        return this.refund(job as Job<RefundJob>);
+      case PAYMENT_JOBS.stock: {
+        const data = (job as Job<StockJob>).data;
+        return data.kind === 'SALE'
+          ? this.settlement.takeStock(data)
+          : this.settlement.restock(data);
+      }
+      case PAYMENT_JOBS.quotation:
+        return this.settlement.settleQuotation(
+          (job as Job<QuotationJob>).data.paymentId,
+        );
+      case PAYMENT_JOBS.expire:
+        return this.settlement.expireStale(
+          this.config.get<number>('payments.expireAfterMinutes', 60),
+        );
       default:
-        this.logger.warn(`Trabajo desconocido en la cola de pagos: ${job.name}`);
+        this.logger.warn(
+          `Trabajo desconocido en la cola de pagos: ${job.name}`,
+        );
         return null;
     }
   }
 
-  // ─── Job handlers ───────────────────────────────────────────────────────────
-
-  /**
-   * Calls the Chilean payment provider (Khipu or Webpay) to initiate the
-   * payment and stores the external ID + token returned by the provider.
-   *
-   * In a real implementation this would use the provider's SDK/API.
-   * The structure below shows exactly where those calls belong.
-   */
-  private async initiatePayment(job: Job<InitiatePaymentJob>) {
-    const { paymentId, provider, amount, currency, description } = job.data;
-
-    this.logger.log(
-      `[${provider}] Iniciando pago ${paymentId} – ${amount} ${currency}`,
-    );
-
-    await this.prisma.payment.update({
-      where: { id: paymentId },
-      data: { status: 'PROCESSING', updatedAt: new Date() },
-    });
-
+  /** On the last failed attempt the refund is marked FAILED, never left hanging. */
+  private async refund(job: Job<RefundJob>) {
     try {
-      let externalId: string;
-      let externalToken: string;
-
-      if (provider === 'KHIPU') {
-        // ── Khipu ──────────────────────────────────────────────────────────
-        // Real call would be:
-        //   const khipu = new KhipuClient({ receiverId, apiKey });
-        //   const { payment_id, payment_url } = await khipu.createPayment({
-        //     subject: description,
-        //     currency: 'CLP',
-        //     amount,
-        //   });
-        externalId = `khipu_sim_${paymentId}`;
-        externalToken = `khipu_url_sim_${paymentId}`;
-      } else {
-        // ── Webpay ─────────────────────────────────────────────────────────
-        // Real call would be:
-        //   const tx = new WebpayPlus.Transaction(new Options(IntegrationCommerceCodes.WEBPAY_PLUS, ...));
-        //   const { token, url } = await tx.create(buyOrder, sessionId, amount, returnUrl);
-        externalId = `webpay_sim_${paymentId}`;
-        externalToken = `webpay_token_sim_${paymentId}`;
-      }
-
-      await this.prisma.payment.update({
-        where: { id: paymentId },
-        data: {
-          externalId,
-          externalToken,
-          updatedAt: new Date(),
-        },
-      });
-
-      // Log the provider interaction
-      await this.prisma.paymentTransaction.create({
-        data: {
-          paymentId,
-          action: 'INITIATE',
-          amount,
-          status: 'PROCESSING',
-          description: `Pago iniciado con ${provider}`,
-        },
-      });
-
-      return { externalId, externalToken };
+      return await this.settlement.executeRefund(job.data.refundId);
     } catch (error) {
-      await this.prisma.payment.update({
-        where: { id: paymentId },
-        data: {
-          status: 'FAILED',
-          failureReason:
-            error instanceof Error ? error.message : 'Error desconocido',
-          updatedAt: new Date(),
-        },
-      });
-      throw error; // Re-throw so BullMQ retries the job
-    }
-  }
-
-  /**
-   * Calls the provider to process a refund.
-   */
-  private async processRefund(job: Job<ProcessRefundJob>) {
-    const { refundId, paymentId, amount, provider } = job.data;
-
-    this.logger.log(
-      `[${provider}] Procesando reembolso ${refundId} – ${amount} CLP`,
-    );
-
-    try {
-      // Real call: provider.refund(externalId, amount)
-      const externalRefundId = `refund_sim_${refundId}`;
-
-      await this.prisma.paymentRefund.update({
-        where: { id: refundId },
-        data: {
-          status: 'COMPLETED',
-          externalId: externalRefundId,
-          processedAt: new Date(),
-        },
-      });
-
-      await this.prisma.payment.update({
-        where: { id: paymentId },
-        data: {
-          status: 'REFUNDED',
-          refundedAt: new Date(),
-          updatedAt: new Date(),
-        },
-      });
-
-      await this.prisma.paymentTransaction.create({
-        data: {
-          paymentId,
-          action: 'REFUND',
-          amount,
-          status: 'COMPLETED',
-          description: `Reembolso procesado con ${provider}`,
-        },
-      });
-
-      return { externalRefundId };
-    } catch (error) {
-      await this.prisma.paymentRefund.update({
-        where: { id: refundId },
-        data: { status: 'FAILED' },
-      });
-      throw error;
-    }
-  }
-
-  /**
-   * Reconciles a webhook event from Khipu or Webpay.
-   * Maps provider event types to our internal PaymentStatus.
-   */
-  private async processWebhook(job: Job<ProcessWebhookJob>) {
-    const { webhookId } = job.data;
-
-    this.logger.log(`Procesando webhook ${webhookId}`);
-
-    const webhook = await this.prisma.paymentWebhook.findUnique({
-      where: { id: webhookId },
-      select: {
-        id: true,
-        paymentId: true,
-        provider: true,
-        eventType: true,
-        payload: true,
-        processed: true,
-      },
-    });
-
-    if (!webhook || webhook.processed) return null;
-
-    try {
-      // Map provider event → internal status
-      let newStatus: string | null = null;
-
-      if (webhook.provider === 'KHIPU') {
-        // Khipu events: payment_received, payment_rejected, payment_expired
-        if (webhook.eventType === 'payment_received') newStatus = 'COMPLETED';
-        else if (webhook.eventType === 'payment_rejected') newStatus = 'FAILED';
-        else if (webhook.eventType === 'payment_expired') newStatus = 'EXPIRED';
-      } else {
-        // Webpay events: authorized, failed, reversed
-        if (webhook.eventType === 'authorized') newStatus = 'COMPLETED';
-        else if (webhook.eventType === 'failed') newStatus = 'FAILED';
-        else if (webhook.eventType === 'reversed') newStatus = 'REFUNDED';
+      const attempts = job.opts.attempts ?? 1;
+      if (job.attemptsMade + 1 >= attempts) {
+        await this.settlement.failRefund(
+          job.data.refundId,
+          error instanceof Error ? error.message : 'Error desconocido',
+        );
       }
-
-      if (newStatus && webhook.paymentId) {
-        await this.prisma.payment.update({
-          where: { id: webhook.paymentId },
-          data: {
-            status: newStatus as any,
-            ...(newStatus === 'COMPLETED' && { processedAt: new Date() }),
-            updatedAt: new Date(),
-          },
-        });
-
-        await this.prisma.paymentTransaction.create({
-          data: {
-            paymentId: webhook.paymentId,
-            action: 'WEBHOOK',
-            status: newStatus,
-            description: `Webhook: ${webhook.eventType} desde ${webhook.provider}`,
-            metadata: webhook.payload as any,
-          },
-        });
-      }
-
-      await this.prisma.paymentWebhook.update({
-        where: { id: webhookId },
-        data: { processed: true, processedAt: new Date() },
-      });
-
-      return { status: newStatus };
-    } catch (error) {
-      await this.prisma.paymentWebhook.update({
-        where: { id: webhookId },
-        data: {
-          processingError:
-            error instanceof Error ? error.message : 'Error desconocido',
-        },
-      });
       throw error;
     }
   }

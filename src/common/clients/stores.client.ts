@@ -1,6 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InternalServerError, NotFoundError } from '../exceptions/index.js';
+import { callSubgraph } from './subgraph-call.js';
+
+/** What stores did with one stock movement (STO-1). */
+export interface StockMovementResult {
+  reference: string;
+  alreadyApplied: boolean;
+  /** False on a SALE means something was oversold. */
+  complete: boolean;
+  items: { storeProductId: number; requested: number; applied: number }[];
+}
 
 /**
  * Minimal slice of a store product the orders service needs to compute
@@ -96,5 +106,57 @@ export class StoresClient {
     }
 
     return products;
+  }
+
+  /**
+   * Takes sold units out of stock (SALE) or puts them back (RESTOCK) through
+   * the stores subgraph's internal `adjustStoreProductStock` (TRX-3). Applied
+   * once per reference, so retrying is safe.
+   */
+  async adjustStock({
+    reference,
+    kind,
+    items,
+  }: {
+    reference: string;
+    kind: 'SALE' | 'RESTOCK';
+    items: { storeProductId: number; quantity: number }[];
+  }): Promise<StockMovementResult> {
+    const secret = this.config.get<string>('internalSecret');
+    if (!secret) {
+      throw new InternalServerError('INTERNAL_SERVICE_SECRET no configurado');
+    }
+    const data = await callSubgraph<{
+      adjustStoreProductStock: StockMovementResult;
+    }>({
+      url: this.config.get<string>('subgraphs.stores'),
+      name: 'stores',
+      query: /* GraphQL */ `
+        mutation AdjustStock(
+          $reference: String!
+          $kind: StoreStockMovementKind!
+          $items: [StockItemInput!]!
+        ) {
+          adjustStoreProductStock(
+            reference: $reference
+            kind: $kind
+            items: $items
+          ) {
+            reference
+            alreadyApplied
+            complete
+            items {
+              storeProductId
+              requested
+              applied
+            }
+          }
+        }
+      `,
+      variables: { reference, kind, items },
+      internalSecret: secret,
+      logger: this.logger,
+    });
+    return data.adjustStoreProductStock;
   }
 }

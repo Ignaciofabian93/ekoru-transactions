@@ -2,7 +2,13 @@ export {
   MarketplaceClient,
   type MarketplaceProductPrice,
 } from './marketplace.client.js';
-export { StoresClient, type StoreProductPrice } from './stores.client.js';
+export {
+  StoresClient,
+  type StoreProductPrice,
+  type StockMovementResult,
+} from './stores.client.js';
+export { ServicesClient, type QuotationCharge } from './services.client.js';
+export { SubgraphError } from './subgraph-call.js';
 export {
   UsersClient,
   type MembershipCharge,

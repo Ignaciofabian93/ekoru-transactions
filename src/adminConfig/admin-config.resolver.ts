@@ -12,16 +12,27 @@ import {
   ChileanPaymentConfigUpsertRowInput,
 } from './dto/index.js';
 import { CurrentAdmin } from '../common/decorators/index.js';
+import { PrismaService } from '../prisma/prisma.service.js';
+import { assertAdminCan } from '../common/admin-access.js';
 
-/** Platform-admin CRUD for the transactions subgraph config tables. */
+/**
+ * Platform-admin CRUD for the transactions subgraph config tables (SEC-8,
+ * TRX-8). Fees and payment configs are MANAGE_SETTINGS, shipping statuses
+ * MANAGE_ORDERS, the permissions of their panel screens. The reads used to
+ * answer anyone, signed out included.
+ */
 @Resolver()
 export class AdminConfigResolver {
-  constructor(private readonly adminConfigService: AdminConfigService) {}
+  constructor(
+    private readonly adminConfigService: AdminConfigService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   // ─── Transaction fees ───────────────────────────────────────────────────────
 
   @Query(() => [TransactionFee], { name: 'adminTransactionFees' })
-  adminTransactionFees() {
+  async adminTransactionFees(@CurrentAdmin() adminId?: string) {
+    await assertAdminCan(this.prisma, adminId, 'MANAGE_SETTINGS');
     return this.adminConfigService.getTransactionFees();
   }
 
@@ -29,7 +40,11 @@ export class AdminConfigResolver {
     name: 'adminTransactionFee',
     nullable: true,
   })
-  adminTransactionFee(@Args('id', { type: () => ID }) id: string) {
+  async adminTransactionFee(
+    @Args('id', { type: () => ID }) id: string,
+    @CurrentAdmin() adminId?: string,
+  ) {
+    await assertAdminCan(this.prisma, adminId, 'MANAGE_SETTINGS');
     return this.adminConfigService.getTransactionFeeById(Number(id));
   }
 
@@ -59,7 +74,8 @@ export class AdminConfigResolver {
   // ─── Shipping statuses ──────────────────────────────────────────────────────
 
   @Query(() => [ShippingStatus], { name: 'adminShippingStatuses' })
-  adminShippingStatuses() {
+  async adminShippingStatuses(@CurrentAdmin() adminId?: string) {
+    await assertAdminCan(this.prisma, adminId, 'MANAGE_ORDERS');
     return this.adminConfigService.getShippingStatuses();
   }
 
@@ -67,7 +83,11 @@ export class AdminConfigResolver {
     name: 'adminShippingStatus',
     nullable: true,
   })
-  adminShippingStatus(@Args('id', { type: () => ID }) id: string) {
+  async adminShippingStatus(
+    @Args('id', { type: () => ID }) id: string,
+    @CurrentAdmin() adminId?: string,
+  ) {
+    await assertAdminCan(this.prisma, adminId, 'MANAGE_ORDERS');
     return this.adminConfigService.getShippingStatusById(Number(id));
   }
 
@@ -101,7 +121,11 @@ export class AdminConfigResolver {
     description:
       'Paginated payment provider configs (apiKey/secretKey never returned). Admins only.',
   })
-  adminChileanPaymentConfigs(@Args() args: ChileanPaymentConfigListArgs) {
+  async adminChileanPaymentConfigs(
+    @Args() args: ChileanPaymentConfigListArgs,
+    @CurrentAdmin() adminId?: string,
+  ) {
+    await assertAdminCan(this.prisma, adminId, 'MANAGE_SETTINGS');
     return this.adminConfigService.getChileanPaymentConfigs(args);
   }
 

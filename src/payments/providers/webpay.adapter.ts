@@ -6,6 +6,8 @@ import type {
   InitiatePaymentArgs,
   InitiatePaymentResult,
   ProviderAdapter,
+  RefundArgs,
+  RefundResult,
 } from './provider-adapter.js';
 
 /**
@@ -190,6 +192,38 @@ export class WebpayAdapter implements ProviderAdapter {
         raw: { error: err instanceof Error ? err.message : 'unknown' },
       };
     }
+  }
+
+  /**
+   * Webpay Plus refund: `tx.refund(token, amount)` (TRX-2). Transbank answers
+   * REVERSED when the whole charge is reversed the same day, or NULLIFIED
+   * (response_code 0 when approved) for a later or partial refund. Anything
+   * else is a refusal. A network error is thrown, so the queue retries.
+   */
+  async refund(args: RefundArgs): Promise<RefundResult> {
+    if (!args.externalToken) {
+      return {
+        ok: false,
+        externalRefundId: null,
+        raw: { reason: 'webpay_missing_token', paymentId: args.paymentId },
+      };
+    }
+    const tx = await this.buildTransaction(args.config);
+    const result = (await tx.refund(args.externalToken, args.amount)) as {
+      type?: string;
+      response_code?: number;
+      authorization_code?: string;
+      nullified_amount?: number;
+      balance?: number;
+    };
+    const ok =
+      result.type === 'REVERSED' ||
+      (result.type === 'NULLIFIED' && result.response_code === 0);
+    return {
+      ok,
+      externalRefundId: result.authorization_code ?? result.type ?? null,
+      raw: result as unknown as Record<string, unknown>,
+    };
   }
 
   // Webpay Plus doesn't push async webhooks — the return-URL POST IS the

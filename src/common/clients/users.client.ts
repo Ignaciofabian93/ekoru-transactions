@@ -25,6 +25,7 @@ export type NotificationType =
   | 'ORDER_SHIPPED'
   | 'ORDER_DELIVERED'
   | 'ORDER_CANCELLED'
+  | 'PAYMENT_RECEIVED'
   | 'PAYMENT_REFUNDED';
 
 /** Coarse lifecycle stage shown to the buyer/seller. */

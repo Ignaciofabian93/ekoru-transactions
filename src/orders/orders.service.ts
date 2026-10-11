@@ -2,15 +2,23 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import {
   BadRequestError,
+  ForbiddenError,
   InternalServerError,
   NotFoundError,
+  UnauthorizedError,
 } from '../common/exceptions/index.js';
+import { assertAdminCan } from '../common/admin-access.js';
+import { assertShippingMove } from './shipping-rules.js';
 import {
   calculatePrismaParams,
   createPaginatedResponse,
 } from '../common/utils/index.js';
 import { ConfigService } from '@nestjs/config';
-import { OrderStatus as DbOrderStatus, TransactionKind } from '@prisma/client';
+import {
+  OrderStatus as DbOrderStatus,
+  Prisma,
+  TransactionKind,
+} from '@prisma/client';
 import {
   MarketplaceClient,
   StoresClient,
@@ -43,7 +51,7 @@ const ORDER_SELECT = {
   version: true,
   createdAt: true,
   updatedAt: true,
-  shippingStatus: { select: { id: true, status: true } },
+  shippingStatus: { select: { id: true, status: true, trackingInfo: true } },
   shippingAddress: true,
   orderItem: {
     select: {
@@ -139,16 +147,33 @@ export class OrdersService {
     }
   }
 
+  /**
+   * Orders a seller received, newest first. `status` filters on the payment
+   * state and `stage` on the shipping stage, so the sales area can ask for
+   * "paid and still preparing" — the orders waiting to ship (WEB-1).
+   */
   async getOrdersBySeller({
     sellerId,
     page,
     pageSize,
+    status,
+    stage,
   }: {
     sellerId: string;
     page: number;
     pageSize: number;
+    status?: OrderStatus;
+    stage?: ShippingStage;
   }) {
-    return this._paginatedOrders({ sellerId }, page, pageSize);
+    return this._paginatedOrders(
+      {
+        sellerId,
+        ...(status && { status }),
+        ...(stage && { shippingStatus: { status: stage } }),
+      },
+      page,
+      pageSize,
+    );
   }
 
   async getOrdersByBuyer({
@@ -368,18 +393,61 @@ export class OrdersService {
     }
   }
 
-  async updateShipping(input: UpdateShippingInput) {
-    try {
-      const orderId = parseInt(input.orderId, 10);
-      const order = await this.prisma.order.findUnique({
-        where: { id: orderId },
-        select: { shippingStatusId: true },
-      });
-      if (!order) throw new NotFoundError('Orden no encontrada');
+  /**
+   * The order's seller moves its shipping forward; anyone else needs to be a
+   * platform admin with MANAGE_ORDERS (TRX-1). Before, anyone at all, signed
+   * out included, could mark any order shipped or delivered.
+   */
+  async updateShipping({
+    input,
+    sellerId,
+    adminId,
+  }: {
+    input: UpdateShippingInput;
+    sellerId?: string;
+    adminId?: string;
+  }) {
+    if (!sellerId && !adminId) {
+      throw new UnauthorizedError('Debe iniciar sesión');
+    }
+    const orderId = parseInt(input.orderId, 10);
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: {
+        sellerId: true,
+        status: true,
+        shippingStatusId: true,
+        shippingStatus: { select: { status: true } },
+      },
+    });
+    if (!order) throw new NotFoundError('Orden no encontrada');
+    if (!sellerId || order.sellerId !== sellerId) {
+      if (!adminId) {
+        throw new ForbiddenError(
+          'Solo el vendedor de la orden puede actualizar el envío',
+        );
+      }
+      await assertAdminCan(this.prisma, adminId, 'MANAGE_ORDERS');
+    }
+    assertShippingMove({
+      orderStatus: String(order.status),
+      from: String(order.shippingStatus.status),
+      to: input.stage,
+    });
 
+    try {
+      // The tracking note belongs to the shipment, so only SHIPPED sets it;
+      // later stages keep whatever the seller wrote then (WEB-1).
+      const trackingInfo =
+        input.stage === ShippingStage.SHIPPED
+          ? input.trackingInfo?.trim() || null
+          : undefined;
       await this.prisma.shippingStatus.update({
         where: { id: order.shippingStatusId },
-        data: { status: input.stage },
+        data: {
+          status: input.stage,
+          ...(trackingInfo !== undefined && { trackingInfo }),
+        },
       });
 
       const updated = await this.prisma.order.findUnique({
@@ -393,7 +461,9 @@ export class OrdersService {
         orderId,
         SHIPPING_STAGE_TO_EMAIL[input.stage],
         SHIPPING_STAGE_TO_TYPE[input.stage],
-        SHIPPING_STAGE_NOTE[input.stage],
+        trackingInfo
+          ? `${SHIPPING_STAGE_NOTE[input.stage]} · Seguimiento: ${trackingInfo}`
+          : SHIPPING_STAGE_NOTE[input.stage],
       );
       if (input.stage === ShippingStage.DELIVERED) {
         void this._awardOrderPoints(orderId);
@@ -411,12 +481,47 @@ export class OrdersService {
    * Marks an order as PAID. Called from `PaymentsService` after the provider
    * confirms a successful charge (via the webhook handler).
    */
-  async markPaid(orderId: number) {
-    await this.prisma.order.update({
-      where: { id: orderId },
+  async markPaid(orderId: number): Promise<boolean> {
+    // Only PENDING_PAYMENT → PAID. A second payment for an order that is
+    // already paid, or that expired, changes nothing here; the caller refunds
+    // it (SettlementService.onCompleted).
+    const { count } = await this.prisma.order.updateMany({
+      where: { id: orderId, status: OrderStatus.PENDING_PAYMENT },
       data: { status: OrderStatus.PAID },
     });
-    void this._notifyOrderParties(orderId, 'IN_PROCESS', 'ORDER_CONFIRMED');
+    if (count > 0) {
+      void this._notifyOrderParties(orderId, 'IN_PROCESS', 'ORDER_CONFIRMED');
+    }
+    return count > 0;
+  }
+
+  /**
+   * A refund went through (TRX-2). A full refund closes the order as
+   * REFUNDED; a partial one leaves it PAID. Both parties are told either way.
+   */
+  async markRefunded({
+    orderId,
+    full,
+    amount,
+  }: {
+    orderId: number;
+    full: boolean;
+    amount: number;
+  }): Promise<void> {
+    if (full) {
+      await this.prisma.order.updateMany({
+        where: { id: orderId, status: OrderStatus.PAID },
+        data: { status: OrderStatus.REFUNDED },
+      });
+    }
+    void this._notifyOrderParties(
+      orderId,
+      'REFUNDED',
+      'PAYMENT_REFUNDED',
+      full
+        ? 'Se reembolsó el total del pago'
+        : `Se reembolsaron $${Math.round(amount).toLocaleString('es-CL')}`,
+    );
   }
 
   /**
@@ -564,7 +669,6 @@ export class OrdersService {
         amount: order.total,
         currency: order.currency,
         note: note ?? null,
-        detailUrl: this._orderUrl(),
         relatedId: String(order.id),
       };
 
@@ -572,10 +676,12 @@ export class OrdersService {
         this.users.notifyTransaction(order.buyerId, {
           ...shared,
           role: 'BUYER',
+          detailUrl: this._orderUrl('BUYER'),
         }),
         this.users.notifyTransaction(order.sellerId, {
           ...shared,
           role: 'SELLER',
+          detailUrl: this._orderUrl('SELLER'),
         }),
       ]);
     } catch (err) {
@@ -636,15 +742,30 @@ export class OrdersService {
    * Locale-less on purpose — the web app's proxy redirects `/profile/orders` to
    * the visitor's `/{lang}/profile/orders`.
    */
-  private _orderUrl(): string {
+  /** The buyer's order history, or the seller's sales area (WEB-1). */
+  private _orderUrl(role: 'BUYER' | 'SELLER'): string {
     const base = this.config.get<string>('webAppBaseUrl');
-    return base ? `${base}/profile/orders` : '';
+    if (!base) return '';
+    return `${base}/profile/${role === 'SELLER' ? 'sales' : 'orders'}`;
   }
 
   // ─── helpers ──────────────────────────────────────────────────────────────
 
+  /** Any filter, for the admin orders list (TRX-11). Callers check access. */
+  listOrders({
+    where,
+    page,
+    pageSize,
+  }: {
+    where: Prisma.OrderWhereInput;
+    page: number;
+    pageSize: number;
+  }) {
+    return this._paginatedOrders(where, page, pageSize);
+  }
+
   private async _paginatedOrders(
-    where: { sellerId?: string; buyerId?: string },
+    where: Prisma.OrderWhereInput,
     page: number,
     pageSize: number,
   ) {

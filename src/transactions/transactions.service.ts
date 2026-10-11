@@ -8,8 +8,7 @@ import {
   calculatePrismaParams,
   createPaginatedResponse,
 } from '../common/utils/index.js';
-import { CreateTransactionInput, CreateExchangeInput } from './dto/index.js';
-import { TransactionKind, ExchangeStatus } from '../graphql/enums/index.js';
+import { TransactionKind } from '../graphql/enums/index.js';
 
 const TRANSACTION_SELECT = {
   id: true,
@@ -116,97 +115,6 @@ export class TransactionsService {
       this.logger.error('Error al obtener las tarifas de transacción:', error);
       throw new InternalServerError(
         'Error al obtener las tarifas de transacción',
-      );
-    }
-  }
-
-  /**
-   * Creates a transaction and optionally an Exchange record atomically.
-   * Points are awarded based on the transaction kind.
-   */
-  async createTransaction(input: CreateTransactionInput) {
-    try {
-      const tx = await this.prisma.transaction.create({
-        data: {
-          kind: input.kind,
-          pointsCollected: input.pointsCollected,
-          sellerId: input.sellerId,
-          transactionFeeId: input.transactionFeeId,
-        },
-        select: TRANSACTION_SELECT,
-      });
-
-      return { ...tx, seller: { id: tx.sellerId } };
-    } catch (error) {
-      this.logger.error('Error al crear la transacción:', error);
-      throw new InternalServerError('Error al crear la transacción');
-    }
-  }
-
-  async createExchange(input: CreateExchangeInput) {
-    try {
-      const exchange = await this.prisma.exchange.create({
-        data: {
-          transactionId: input.transactionId,
-          offeredProductId: input.offeredProductId,
-          requestedProductId: input.requestedProductId,
-          notes: input.notes,
-        },
-        select: {
-          id: true,
-          transactionId: true,
-          offeredProductId: true,
-          requestedProductId: true,
-          status: true,
-          notes: true,
-          createdAt: true,
-          completedAt: true,
-        },
-      });
-
-      return exchange;
-    } catch (error) {
-      this.logger.error('Error al crear el intercambio:', error);
-      throw new InternalServerError('Error al crear el intercambio');
-    }
-  }
-
-  async updateExchangeStatus({
-    id,
-    status,
-  }: {
-    id: number;
-    status: ExchangeStatus;
-  }) {
-    try {
-      const exchange = await this.prisma.exchange.update({
-        where: { id },
-        data: {
-          status,
-          ...(status === ExchangeStatus.COMPLETED && {
-            completedAt: new Date(),
-          }),
-        },
-        select: {
-          id: true,
-          transactionId: true,
-          offeredProductId: true,
-          requestedProductId: true,
-          status: true,
-          notes: true,
-          createdAt: true,
-          completedAt: true,
-        },
-      });
-
-      return exchange;
-    } catch (error) {
-      this.logger.error(
-        'Error al actualizar el estado del intercambio:',
-        error,
-      );
-      throw new InternalServerError(
-        'Error al actualizar el estado del intercambio',
       );
     }
   }

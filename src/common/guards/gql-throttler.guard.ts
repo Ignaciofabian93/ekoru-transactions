@@ -11,6 +11,12 @@ import { ThrottlerGuard } from '@nestjs/throttler';
  *
  * Mirrors the guard in the other subgraphs: Apollo Federation does not always
  * populate `ctx.res`, but Express hangs the response off the request.
+ *
+ * Every request reaches this subgraph from the gateway, so `req.ip` is the
+ * gateway container for all visitors. The gateway forwards the visitor's own
+ * address in `x-client-ip` (always overwriting any client-supplied value), and
+ * that is what we count against (GW-4). Subgraph ports are not published, so
+ * the header can only come from the gateway.
  */
 @Injectable()
 export class GqlThrottlerGuard extends ThrottlerGuard {
@@ -22,5 +28,13 @@ export class GqlThrottlerGuard extends ThrottlerGuard {
     }
     const http = context.switchToHttp();
     return { req: http.getRequest(), res: http.getResponse() };
+  }
+
+  protected getTracker(req: Record<string, any>): Promise<string> {
+    const headers = (req.headers ?? {}) as Record<string, unknown>;
+    const forwarded = headers['x-client-ip'];
+    const clientIp =
+      typeof forwarded === 'string' && forwarded.trim() ? forwarded.trim() : '';
+    return Promise.resolve(clientIp || (req.ip as string) || 'unknown');
   }
 }

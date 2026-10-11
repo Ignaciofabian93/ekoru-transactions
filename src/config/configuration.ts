@@ -14,6 +14,9 @@ export default () => ({
     // Used by UsersClient to price + activate paid subscriptions (Payment
     // receiver = EKORU). Called directly, not through the gateway.
     users: process.env.USERS_URL,
+    // Prices and settles quotation payments (TRX-6) through services'
+    // internal quotationCharge / markQuotationPaid.
+    services: process.env.SERVICES_URL,
   },
   /** Public URL of the gateway. Used to build provider return URLs. */
   gatewayBaseUrl: process.env.GATEWAY_BASE_URL,
@@ -35,6 +38,21 @@ export default () => ({
    * mutations so only the gateway can mark payments terminal.
    */
   internalSecret: process.env.INTERNAL_SERVICE_SECRET,
+  /**
+   * Abandoned checkouts (TRX-9): payments still pending and orders still
+   * unpaid after `expireAfterMinutes` expire. Webpay's form times out after
+   * about ten minutes, so an hour never cuts off a buyer who is paying.
+   */
+  payments: {
+    expireAfterMinutes: parseInt(
+      process.env.PAYMENT_EXPIRE_MINUTES || '60',
+      10,
+    ),
+    expireSweepEveryMin: parseInt(
+      process.env.PAYMENT_EXPIRE_SWEEP_MINUTES || '10',
+      10,
+    ),
+  },
   /**
    * Peer-to-peer marketplace deal (anti-scam) tunables. Deals meet in person,
    * cash only; these govern the confirmation window, penalties, the sweep
