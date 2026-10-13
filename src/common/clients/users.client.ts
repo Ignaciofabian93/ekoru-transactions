@@ -26,7 +26,8 @@ export type NotificationType =
   | 'ORDER_DELIVERED'
   | 'ORDER_CANCELLED'
   | 'PAYMENT_RECEIVED'
-  | 'PAYMENT_REFUNDED';
+  | 'PAYMENT_REFUNDED'
+  | 'MESSAGE_RECEIVED';
 
 /** Coarse lifecycle stage shown to the buyer/seller. */
 export type TransactionEmailStage =
@@ -220,6 +221,34 @@ export class UsersClient {
       relatedId,
       actionUrl: detailUrl,
       data: { ...data, detailUrl },
+    });
+  }
+
+  /**
+   * Tells the recipient of a chat message about it (TRX-18, USR-13). The chat
+   * service sends it for the first unread message only, so a burst of messages
+   * makes one notice until the recipient reads the thread.
+   */
+  async notifyNewMessage(
+    recipientId: string,
+    {
+      conversationId,
+      senderId,
+      preview,
+      url,
+    }: {
+      conversationId: number;
+      senderId: string;
+      preview: string;
+      url: string;
+    },
+  ): Promise<boolean> {
+    return this.emit({
+      sellerId: recipientId,
+      type: 'MESSAGE_RECEIVED',
+      relatedId: `conversation:${conversationId}`,
+      actionUrl: url || null,
+      data: { actorSellerId: senderId, preview },
     });
   }
 

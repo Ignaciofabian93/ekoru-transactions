@@ -1,4 +1,4 @@
-import { ObjectType, Field, Int, Directive } from '@nestjs/graphql';
+import { ObjectType, Field, ID, Int, Directive } from '@nestjs/graphql';
 
 /**
  * Federation reference to a marketplace Product (owned by ekoru-marketplace).
@@ -24,6 +24,16 @@ export class ProductRef {
 @Directive('@extends')
 export class StoreProductRef {
   @Field(() => Int)
+  @Directive('@external')
+  id: number;
+}
+
+/** And for a Service (owned by ekoru-services), whose id is a GraphQL ID. */
+@ObjectType('Service')
+@Directive('@key(fields: "id")')
+@Directive('@extends')
+export class ServiceRef {
+  @Field(() => ID)
   @Directive('@external')
   id: number;
 }

@@ -11,7 +11,8 @@ export type AdminPermissionName =
   | 'MANAGE_ORDERS'
   | 'PROCESS_REFUNDS'
   | 'VIEW_TRANSACTIONS'
-  | 'VIEW_ANALYTICS';
+  | 'VIEW_ANALYTICS'
+  | 'MODERATE_CONTENT';
 
 type Permissions = AdminPermissionName | readonly AdminPermissionName[];
 

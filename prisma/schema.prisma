@@ -120,6 +120,22 @@ enum P2PDealType {
   EXCHANGE
 }
 
+enum ConversationItemType {
+  PRODUCT
+  STORE_PRODUCT
+  SERVICE
+}
+
+enum ConversationStatus {
+  OPEN
+  BLOCKED
+}
+
+enum ConversationMessageKind {
+  TEXT
+  SYSTEM
+}
+
 // ─── Models ──────────────────────────────────────────────────────────────────────
 
 model Transaction {
@@ -415,5 +431,53 @@ model P2PReputation {
   updatedAt      DateTime  @updatedAt
 
   @@index([blockedUntil])
+}
+
+model Conversation {
+  id               Int                   @id @default(autoincrement())
+  buyerId          String
+  sellerId         String
+  itemType         ConversationItemType
+  productId        Int?
+  storeProductId   Int?
+  serviceId        Int?
+  /// "PRODUCT:12": one thread per buyer, seller and item. Postgres treats NULLs
+  /// as distinct, so the three nullable item ids cannot carry the unique key.
+  itemKey          String
+  status           ConversationStatus    @default(OPEN)
+  blockedById      String?
+  blockedAt        DateTime?
+  lastMessageAt    DateTime              @default(now())
+  buyerLastReadAt  DateTime?
+  sellerLastReadAt DateTime?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  messages         ConversationMessage[]
+
+  @@unique([buyerId, sellerId, itemKey])
+  @@index([buyerId, lastMessageAt(sort: Desc)])
+  @@index([sellerId, lastMessageAt(sort: Desc)])
+}
+
+model ConversationMessage {
+  id               Int                     @id @default(autoincrement())
+  conversationId   Int
+  /// Null for SYSTEM messages.
+  senderId         String?
+  kind             ConversationMessageKind @default(TEXT)
+  body             String
+  /// Contact details were replaced before saving (TRX-19). Only the masked text is kept.
+  masked           Boolean                 @default(false)
+  reportedAt       DateTime?
+  reportedById     String?
+  reportReason     String?
+  /// An operator dealt with the report (ADM-14).
+  reportResolvedAt DateTime?
+  createdAt        DateTime                @default(now())
+  conversation     Conversation            @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, id(sort: Desc)])
+  @@index([reportedAt])
+  @@index([senderId, createdAt])
 }
 

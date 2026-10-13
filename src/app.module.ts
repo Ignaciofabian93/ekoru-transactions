@@ -17,6 +17,7 @@ import { PaymentsModule } from './payments/payments.module.js';
 import { OrdersModule } from './orders/orders.module.js';
 import { TransactionsModule } from './transactions/transactions.module.js';
 import { MarketplaceDealsModule } from './marketplace-deals/marketplace-deals.module.js';
+import { ChatModule } from './chat/chat.module.js';
 import { AdminConfigModule } from './adminConfig/index.js';
 import { AdminOperationsModule } from './adminOperations/admin-operations.module.js';
 import { QueuesModule } from './queues/queues.module.js';
@@ -114,6 +115,7 @@ import { PrometheusModule } from '@willsoto/nestjs-prometheus';
     OrdersModule, // Orders + shipping tracking
     TransactionsModule, // Eco-transaction ledger + exchanges
     MarketplaceDealsModule, // P2P cash sales + exchanges (anti-scam trust layer)
+    ChatModule, // buyer–seller conversations (TRX-18)
     AdminConfigModule, // Platform-admin CRUD for config tables (TransactionFee…)
     AdminOperationsModule, // Operator lists: orders, payments, refunds, deals (TRX-11)
 

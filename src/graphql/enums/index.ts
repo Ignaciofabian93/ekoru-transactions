@@ -222,3 +222,48 @@ registerEnumType(P2PDealType, {
   name: 'P2PDealType',
   description: 'Kind of P2P deal: cash sale or item exchange',
 });
+
+// ─── Chat (TRX-18) ───────────────────────────────────────────────────────────
+
+export enum ConversationItemType {
+  PRODUCT = 'PRODUCT',
+  STORE_PRODUCT = 'STORE_PRODUCT',
+  SERVICE = 'SERVICE',
+}
+
+export enum ConversationStatus {
+  OPEN = 'OPEN',
+  BLOCKED = 'BLOCKED',
+}
+
+export enum ConversationMessageKind {
+  TEXT = 'TEXT',
+  SYSTEM = 'SYSTEM',
+}
+
+/** The caller's side of a conversation. */
+export enum ConversationRole {
+  BUYER = 'BUYER',
+  SELLER = 'SELLER',
+}
+
+registerEnumType(ConversationItemType, {
+  name: 'ConversationItemType',
+  description:
+    'What a conversation is about: a product, a store product or a service',
+});
+
+registerEnumType(ConversationStatus, {
+  name: 'ConversationStatus',
+  description: 'OPEN takes messages; BLOCKED takes none',
+});
+
+registerEnumType(ConversationMessageKind, {
+  name: 'ConversationMessageKind',
+  description: 'TEXT from a participant, SYSTEM from EKORU',
+});
+
+registerEnumType(ConversationRole, {
+  name: 'ConversationRole',
+  description: "The caller's side of a conversation",
+});
