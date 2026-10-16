@@ -1,3 +1,32 @@
+// Writes this service's env file for one environment from Infisical (INF-14). The CLI runs
+// as a one-off container on the infisical-clients network, so nothing is installed in
+// Jenkins. The folder in Infisical is named after SERVICE_NAME. If the file lacks the key
+// the service always has, the deploy stops before anything is built.
+def exportEnvFromInfisical(String environment, String envFile, String requiredKey) {
+  withCredentials([
+    string(credentialsId: 'infisical-client-id', variable: 'INFISICAL_UNIVERSAL_AUTH_CLIENT_ID'),
+    string(credentialsId: 'infisical-client-secret', variable: 'INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET'),
+    string(credentialsId: 'infisical-project-id', variable: 'INFISICAL_PROJECT_ID')
+  ]) {
+    withEnv(["ENV_SLUG=${environment}", "ENV_FILE=${envFile}", "REQUIRED_KEY=${requiredKey}"]) {
+      sh '''
+        set +x  # keeps the access token out of the build log
+        RUN="docker run --rm --network infisical-clients -e INFISICAL_DOMAIN=http://infisical:8080"
+        IMAGE=infisical/cli:0.44.1
+        INFISICAL_TOKEN=$($RUN -e INFISICAL_UNIVERSAL_AUTH_CLIENT_ID -e INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET \
+          $IMAGE login --method=universal-auth --silent --plain)
+        export INFISICAL_TOKEN
+        # --expand=false: values are written exactly as stored, so a "$" in a password stays.
+        $RUN -e INFISICAL_TOKEN -e INFISICAL_PROJECT_ID $IMAGE \
+          sm export --env="$ENV_SLUG" --path="/$SERVICE_NAME" --format=dotenv --expand=false --silent \
+          > "$ENV_FILE"
+        grep -q "^$REQUIRED_KEY=" "$ENV_FILE" \
+          || { echo "The Infisical export for $SERVICE_NAME ($ENV_SLUG) has no $REQUIRED_KEY. Not deploying."; exit 1; }
+      '''
+    }
+  }
+}
+
 pipeline {
   agent none
 
@@ -78,8 +107,8 @@ pipeline {
       agent any
       when { branch 'main' }
       steps {
+        script { exportEnvFromInfisical('staging', '.env.staging', 'DATABASE_URL') }
         sh '''
-          cp /opt/ekoru/secrets/ekoru-transactions/.env.staging ${WORKSPACE}/.env.staging
           docker compose -f compose.staging.yml build --no-cache
           docker compose -f compose.staging.yml up -d --force-recreate
           docker image prune -f
@@ -112,8 +141,8 @@ pipeline {
       agent any
       when { branch 'main' }
       steps {
+        script { exportEnvFromInfisical('prod', '.env.prod', 'DATABASE_URL') }
         sh '''
-          cp /opt/ekoru/secrets/ekoru-transactions/.env.prod ${WORKSPACE}/.env.prod
           docker compose -f compose.prod.yml build --no-cache
           docker compose -f compose.prod.yml up -d --force-recreate
           docker image prune -f
