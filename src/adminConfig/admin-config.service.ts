@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { PaymentSecrets } from '../payments/payment-secrets.js';
 import { InternalServerError } from '../common/exceptions/index.js';
 import { assertAdminCan } from '../common/admin-access.js';
 import {
@@ -45,7 +46,10 @@ const PAYMENT_CONFIG_SELECT = {
 export class AdminConfigService {
   private readonly logger = new Logger(AdminConfigService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly secrets: PaymentSecrets,
+  ) {}
 
   // ─── Transaction fees ───────────────────────────────────────────────────────
 
@@ -235,8 +239,9 @@ export class AdminConfigService {
         sellerId: row.sellerId,
         provider: row.provider,
         merchantId: row.merchantId,
-        apiKey: row.apiKey,
-        secretKey: row.secretKey,
+        // Sealed at rest (TRX-21); null still clears, omitted still keeps.
+        apiKey: this.secrets.seal(row.apiKey),
+        secretKey: this.secrets.seal(row.secretKey),
         environment: row.environment,
         isActive: row.isActive,
         webhookUrl: row.webhookUrl,
@@ -276,8 +281,8 @@ export class AdminConfigService {
           sellerId: row.sellerId!,
           provider: row.provider!,
           merchantId: row.merchantId,
-          apiKey: row.apiKey,
-          secretKey: row.secretKey,
+          apiKey: this.secrets.seal(row.apiKey),
+          secretKey: this.secrets.seal(row.secretKey),
           environment: row.environment ?? undefined,
           isActive: row.isActive ?? undefined,
           webhookUrl: row.webhookUrl,

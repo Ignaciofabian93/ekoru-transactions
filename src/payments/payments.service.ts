@@ -33,6 +33,7 @@ import { MercadoPagoAdapter, ProviderRegistry } from './providers/index.js';
 import type { ConfirmPaymentResult } from './providers/index.js';
 import { SettlementService } from './settlement.service.js';
 import { CommissionService } from './commission.service.js';
+import { PaymentSecrets } from './payment-secrets.js';
 import { MercadoPagoConnectService } from './mercadopago/mercadopago-connect.service.js';
 import { verifyMercadoPagoSignature } from './mercadopago/mercadopago-signature.js';
 import { paymentIdFromReference } from './providers/mercadopago.adapter.js';
@@ -99,6 +100,7 @@ export class PaymentsService {
     private readonly commission: CommissionService,
     private readonly mercadoPago: MercadoPagoAdapter,
     private readonly mercadoPagoConnect: MercadoPagoConnectService,
+    private readonly secrets: PaymentSecrets,
   ) {}
 
   /** Providers buyers may pay with now (`PAYMENT_PROVIDERS`); Webpay waits as a future option. */
@@ -203,8 +205,8 @@ export class PaymentsService {
           sellerId: input.sellerId,
           provider: input.provider,
           merchantId: input.merchantId,
-          apiKey: input.apiKey,
-          secretKey: input.secretKey,
+          apiKey: this.secrets.seal(input.apiKey),
+          secretKey: this.secrets.seal(input.secretKey),
           environment: input.environment,
           isActive: input.isActive ?? true,
           webhookUrl: input.webhookUrl,
@@ -378,12 +380,7 @@ export class PaymentsService {
         description: `Orden Ekoru #${order.id}`,
         returnUrl: input.returnUrl,
         platformFee: commission.fee,
-        config: {
-          environment: config.environment,
-          merchantId: config.merchantId,
-          apiKey: config.apiKey,
-          secretKey: config.secretKey,
-        },
+        config: this.secrets.credentials(config),
       });
     } catch (err) {
       // Flip the Payment to FAILED so the buyer can retry with another method.
@@ -498,12 +495,7 @@ export class PaymentsService {
         currency: charge.currency,
         description: 'EKORU suscripción',
         returnUrl,
-        config: {
-          environment: config.environment,
-          merchantId: config.merchantId,
-          apiKey: config.apiKey,
-          secretKey: config.secretKey,
-        },
+        config: this.secrets.credentials(config),
       });
     } catch (err) {
       await this.prisma.payment.update({
@@ -630,12 +622,7 @@ export class PaymentsService {
         description: `Cotización Ekoru #${quotationId}`,
         returnUrl,
         platformFee: commission.fee,
-        config: {
-          environment: config.environment,
-          merchantId: config.merchantId,
-          apiKey: config.apiKey,
-          secretKey: config.secretKey,
-        },
+        config: this.secrets.credentials(config),
       });
     } catch (err) {
       await this.prisma.payment.update({
@@ -741,7 +728,7 @@ export class PaymentsService {
       amount: payment.amount,
       externalId: payment.externalId!,
       externalToken: payment.externalToken,
-      config: adapterConfig(config),
+      config: this.secrets.credentials(config),
       rawPayload,
     });
 
@@ -1048,7 +1035,7 @@ export class PaymentsService {
     if (!payment) {
       const id = await this.mercadoPago.identify({
         providerPaymentId: resourceId,
-        config: adapterConfig(config),
+        config: this.secrets.credentials(config),
       });
       payment = id
         ? await this.prisma.payment.findFirst({
@@ -1075,7 +1062,7 @@ export class PaymentsService {
       amount: payment.amount,
       externalId: payment.externalId ?? '',
       providerPaymentId: resourceId,
-      config: adapterConfig(config),
+      config: this.secrets.credentials(config),
     });
     if (result.status === 'PROCESSING') {
       await done({ paymentId: payment.id });
@@ -1121,7 +1108,7 @@ export class PaymentsService {
           paymentId: payment.id,
           amount: payment.amount,
           externalId: payment.externalId ?? '',
-          config: adapterConfig(payment.chileanPaymentConfig),
+          config: this.secrets.credentials(payment.chileanPaymentConfig),
         });
         if (result.status === 'PROCESSING') continue;
         await this._settle(payment, result, ChileanPaymentProvider.MERCADOPAGO);
@@ -1178,7 +1165,9 @@ export class PaymentsService {
     const adapter = this.providers.for(provider);
     if (typeof adapter.verifySignature !== 'function') return false;
 
-    return adapter.verifySignature(rawBody, signature, config.secretKey);
+    const secret = this.secrets.open(config.secretKey);
+    if (!secret) return false;
+    return adapter.verifySignature(rawBody, signature, secret);
   }
 
   /**
@@ -1593,21 +1582,6 @@ const RETURN_SELECT = {
   payerId: true,
   metadata: true,
 } as const;
-
-/** The provider credentials an adapter acts with. */
-function adapterConfig(config: {
-  environment: 'SANDBOX' | 'PRODUCTION';
-  merchantId: string | null;
-  apiKey: string | null;
-  secretKey: string | null;
-}) {
-  return {
-    environment: config.environment,
-    merchantId: config.merchantId,
-    apiKey: config.apiKey,
-    secretKey: config.secretKey,
-  };
-}
 
 const PAYMENT_SELECT = {
   id: true,

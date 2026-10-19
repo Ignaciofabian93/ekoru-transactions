@@ -16,7 +16,9 @@ buyer ──pays──▶ store's own Mercado Pago account
 ```
 
 - Mercado Pago's **split 1:1**. Each store connects its own account to EKORU's
-  application with OAuth, once, from the admin panel (**Negocio → Cobros**).
+  application with OAuth, once and for free. It can do it from the web profile
+  (**Cobros**, `/profile/payments`) or from the admin panel (**Negocio →
+  Cobros**).
 - Each charge is created with the store's access token, so the money lands in
   the store's account. EKORU never receives or holds sale money.
 - EKORU's commission is passed as `marketplace_fee`. Mercado Pago credits it to
@@ -41,9 +43,11 @@ Do the steps below for each one, in
 1. **Create the application.** Choose Pagos online, then "No" to an
    e-commerce platform, then the product Checkout Pro and the Marketplace
    model.
-2. **Redirect URLs** (Detalles de aplicación → Editar). Add both, exactly:
-   - `https://admin.ekoru.cl/payment-setup`
-   - the staging panel's `…/payment-setup`
+2. **Redirect URLs** (Detalles de aplicación → Editar). Add each one exactly,
+   with no language prefix:
+   - production application: `https://admin.ekoru.cl/payment-setup` (panel)
+     and `https://<web>/profile/payments` (web);
+   - staging application: the same two paths on the staging panel and web.
 3. **PKCE.** In the same screen, turn on "flujo de código de autorización con
    PKCE". To leave it off, set `MERCADOPAGO_USE_PKCE=false`.
 4. **Webhooks** (Webhooks → Configurar notificaciones):
@@ -61,10 +65,18 @@ Do the steps below for each one, in
 | `MERCADOPAGO_CLIENT_ID` | application id | application id |
 | `MERCADOPAGO_CLIENT_SECRET` | application secret | application secret |
 | `MERCADOPAGO_REDIRECT_URI` | staging panel `/payment-setup` | `https://admin.ekoru.cl/payment-setup` |
+| `MERCADOPAGO_WEB_REDIRECT_URI` | staging web `/profile/payments` | `https://<web>/profile/payments` |
+| `PAYMENT_SECRETS_KEY` | `openssl rand -base64 32` | a different `openssl rand -base64 32` |
 | `MERCADOPAGO_WEBHOOK_SECRET` | webhook secret | webhook secret |
 | `MERCADOPAGO_ENVIRONMENT` | `SANDBOX` | `PRODUCTION` |
 | `MERCADOPAGO_USE_PKCE` | optional, default `true` | optional, default `true` |
 | `MERCADOPAGO_TEST_TOKEN` | leave unset (`false`) | leave unset |
+
+`PAYMENT_SECRETS_KEY` seals the stores' tokens and Webpay keys at rest
+(TRX-21). Production refuses to store a credential without it. Losing it makes
+every stored token unreadable, and stores would have to connect again, so keep
+it in Infisical, which is backed up. Plain-text rows from before it existed
+are sealed on the next boot.
 
 `GATEWAY_BASE_URL` must be the gateway's public URL: it builds the webhook URL
 on each preference. Without `MERCADOPAGO_WEBHOOK_SECRET` every webhook is
@@ -97,11 +109,14 @@ row in **Configuración de pagos**:
 
 ## 6. What happens when
 
-- **The store connects.** The business admin clicks "Conectar Mercado Pago" and
-  authorizes on Mercado Pago, which sends them back to `/payment-setup?code&state`.
-  The panel then calls `completeMercadoPagoConnection`. The state is signed and
-  carries the store and the admin, so only the admin who started can finish,
-  within 15 minutes.
+- **The store connects.** It clicks "Conectar Mercado Pago" in the web's
+  Cobros (as the business) or the panel's (as a BUSINESS admin), and
+  authorizes on Mercado Pago.
+  - Mercado Pago sends it back to where it started, `/profile/payments` or
+    `/payment-setup`, with `?code&state`, and that page calls
+    `completeMercadoPagoConnection`.
+  - The state is signed and carries the store, who started and where. Only
+    that same person can finish, within 15 minutes.
 - **Checkout.** `createOrder` refuses a seller without an active connection
   (TRX-4), and `Seller.canReceivePayments` tells the web to hide buy buttons.
   The preference uses `binary_mode`, so a charge is approved or rejected at

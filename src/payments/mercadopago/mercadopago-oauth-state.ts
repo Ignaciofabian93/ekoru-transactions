@@ -8,11 +8,18 @@ import {
 /** How long a store has to finish authorizing on Mercado Pago. */
 export const CONNECT_STATE_TTL_MS = 15 * 60_000;
 
+/** Where the connection was started, and so where Mercado Pago sends the store back. */
+export type ConnectSurface = 'panel' | 'web';
+
 export interface ConnectState {
   /** The store being connected. */
   sellerId: string;
-  /** The business admin who started it; only they can finish it. */
-  adminId: string;
+  /**
+   * Who started it (`admin:<id>` in the panel, `seller:<id>` on the web);
+   * only they can finish it.
+   */
+  actor: string;
+  surface: ConnectSurface;
   /** Epoch ms after which the state is refused. */
   expiresAt: number;
 }
@@ -29,13 +36,14 @@ function mac(key: string, message: string): Buffer {
  * the signature is the proof.
  */
 export function signConnectState(
-  { sellerId, adminId, expiresAt }: ConnectState,
+  { sellerId, actor, surface, expiresAt }: ConnectState,
   key: string,
 ): string {
   const body = b64url(
     JSON.stringify({
       s: sellerId,
-      a: adminId,
+      a: actor,
+      u: surface,
       e: expiresAt,
       n: randomBytes(9).toString('base64url'),
     }),
@@ -61,17 +69,24 @@ export function readConnectState(
     const parsed = JSON.parse(Buffer.from(body, 'base64url').toString()) as {
       s?: unknown;
       a?: unknown;
+      u?: unknown;
       e?: unknown;
     };
     if (
       typeof parsed.s !== 'string' ||
       typeof parsed.a !== 'string' ||
+      (parsed.u !== 'panel' && parsed.u !== 'web') ||
       typeof parsed.e !== 'number' ||
       parsed.e < now
     ) {
       return null;
     }
-    return { sellerId: parsed.s, adminId: parsed.a, expiresAt: parsed.e };
+    return {
+      sellerId: parsed.s,
+      actor: parsed.a,
+      surface: parsed.u,
+      expiresAt: parsed.e,
+    };
   } catch {
     return null;
   }

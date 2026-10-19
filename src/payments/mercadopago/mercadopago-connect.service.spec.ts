@@ -3,6 +3,7 @@ import { MercadoPagoConnectService } from './mercadopago-connect.service.js';
 import { MercadoPagoApiError, type MercadoPagoApi } from './mercadopago.api.js';
 import type { PrismaService } from '../../prisma/prisma.service.js';
 import type { CommissionService } from '../commission.service.js';
+import { PaymentSecrets } from '../payment-secrets.js';
 import { BadRequestError } from '../../common/exceptions/index.js';
 
 function make(settings: Record<string, unknown> = {}) {
@@ -23,6 +24,7 @@ function make(settings: Record<string, unknown> = {}) {
     'mercadoPago.clientId': '1234567890',
     'mercadoPago.clientSecret': 'app-secret',
     'mercadoPago.redirectUri': 'https://admin.ekoru.cl/payment-setup',
+    'mercadoPago.webRedirectUri': 'https://ekoru.cl/profile/payments',
     'mercadoPago.authBaseUrl': 'https://auth.mercadopago.com',
     'mercadoPago.usePkce': true,
     'mercadoPago.testToken': false,
@@ -39,6 +41,10 @@ function make(settings: Record<string, unknown> = {}) {
       config as unknown as ConfigService,
       api as unknown as MercadoPagoApi,
       commission as unknown as CommissionService,
+      new PaymentSecrets(
+        { get: () => undefined } as unknown as ConfigService,
+        prisma as unknown as PrismaService,
+      ),
     ),
     prisma,
     api,
@@ -62,7 +68,11 @@ describe('MercadoPagoConnectService', () => {
   it('sends the business to the authorization page with state and PKCE', () => {
     const { service } = make();
     const url = new URL(
-      service.authorizationUrl({ sellerId: 'store', adminId: 'admin' }),
+      service.authorizationUrl({
+        sellerId: 'store',
+        actor: 'admin:admin',
+        surface: 'panel',
+      }),
     );
     expect(url.origin + url.pathname).toBe(
       'https://auth.mercadopago.com/authorization',
@@ -80,12 +90,16 @@ describe('MercadoPagoConnectService', () => {
     const { service, prisma, api } = make();
     api.exchangeCode.mockResolvedValue(token);
     const state = stateOf(
-      service.authorizationUrl({ sellerId: 'store', adminId: 'admin' }),
+      service.authorizationUrl({
+        sellerId: 'store',
+        actor: 'admin:admin',
+        surface: 'panel',
+      }),
     );
 
     await service.complete({
       sellerId: 'store',
-      adminId: 'admin',
+      actor: 'admin:admin',
       code: 'TG-code',
       state,
     });
@@ -117,12 +131,16 @@ describe('MercadoPagoConnectService', () => {
   it('refuses a state started for another store or by another admin', async () => {
     const { service, api } = make();
     const state = stateOf(
-      service.authorizationUrl({ sellerId: 'store', adminId: 'admin' }),
+      service.authorizationUrl({
+        sellerId: 'store',
+        actor: 'admin:admin',
+        surface: 'panel',
+      }),
     );
     await expect(
       service.complete({
         sellerId: 'other-store',
-        adminId: 'admin',
+        actor: 'admin:admin',
         code: 'TG-code',
         state,
       }),
@@ -130,7 +148,54 @@ describe('MercadoPagoConnectService', () => {
     await expect(
       service.complete({
         sellerId: 'store',
-        adminId: 'someone-else',
+        actor: 'admin:someone-else',
+        code: 'TG-code',
+        state,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestError);
+    expect(api.exchangeCode).not.toHaveBeenCalled();
+  });
+
+  it('brings a business that started on the web back to the web', async () => {
+    const { service, api } = make();
+    api.exchangeCode.mockResolvedValue(token);
+    const url = service.authorizationUrl({
+      sellerId: 'store',
+      actor: 'seller:store',
+      surface: 'web',
+    });
+    expect(new URL(url).searchParams.get('redirect_uri')).toBe(
+      'https://ekoru.cl/profile/payments',
+    );
+
+    await service.complete({
+      sellerId: 'store',
+      actor: 'seller:store',
+      code: 'TG-code',
+      state: stateOf(url),
+    });
+
+    // The exchange names the redirect URL the business was sent with.
+    expect(api.exchangeCode).toHaveBeenCalledWith(
+      expect.objectContaining({
+        redirectUri: 'https://ekoru.cl/profile/payments',
+      }),
+    );
+  });
+
+  it('does not let a panel admin finish what the business started on the web', async () => {
+    const { service, api } = make();
+    const state = stateOf(
+      service.authorizationUrl({
+        sellerId: 'store',
+        actor: 'seller:store',
+        surface: 'web',
+      }),
+    );
+    await expect(
+      service.complete({
+        sellerId: 'store',
+        actor: 'admin:admin',
         code: 'TG-code',
         state,
       }),
@@ -143,7 +208,7 @@ describe('MercadoPagoConnectService', () => {
     await expect(
       service.complete({
         sellerId: 'store',
-        adminId: 'admin',
+        actor: 'admin:admin',
         code: 'TG-code',
         state: 'forged.state',
       }),

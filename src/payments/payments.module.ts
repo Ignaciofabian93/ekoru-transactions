@@ -11,6 +11,7 @@ import {
 } from '../common/clients/index.js';
 import { SettlementService } from './settlement.service.js';
 import { CommissionService } from './commission.service.js';
+import { PaymentSecrets } from './payment-secrets.js';
 import {
   ProviderRegistry,
   WebpayAdapter,
@@ -38,11 +39,17 @@ import { MercadoPagoConnectResolver } from './mercadopago/mercadopago-connect.re
     MercadoPagoConnectService, // stores connect their account with OAuth (TRX-5)
     MercadoPagoConnectResolver,
     CommissionService, // EKORU's commission per seller type (TRX-10)
+    PaymentSecrets, // provider secrets sealed at rest (TRX-21)
     UsersClient, // pricing + activation for subscription (platform) payments
     SettlementService, // completion, refunds, stock, expiry
     StoresClient, // stock after a paid or refunded order (TRX-3)
     ServicesClient, // quotation charge and mark-paid (TRX-6)
   ],
-  exports: [PaymentsService, SettlementService, MercadoPagoConnectService],
+  exports: [
+    PaymentsService,
+    SettlementService,
+    MercadoPagoConnectService,
+    PaymentSecrets,
+  ],
 })
 export class PaymentsModule {}

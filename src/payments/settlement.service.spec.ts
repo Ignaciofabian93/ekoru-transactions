@@ -1,5 +1,6 @@
 import { SettlementService } from './settlement.service.js';
 import { PAYMENT_JOBS } from './payment-queue.js';
+import { PaymentSecrets } from './payment-secrets.js';
 import { BadRequestError } from '../common/exceptions/index.js';
 import { SubgraphError } from '../common/clients/subgraph-call.js';
 import type { PrismaService } from '../prisma/prisma.service.js';
@@ -79,6 +80,10 @@ function make() {
     queue as unknown as Queue,
     users as unknown as UsersClient,
     config as unknown as ConfigService,
+    new PaymentSecrets(
+      { get: () => undefined } as unknown as ConfigService,
+      prisma as unknown as PrismaService,
+    ),
   );
   return {
     service,

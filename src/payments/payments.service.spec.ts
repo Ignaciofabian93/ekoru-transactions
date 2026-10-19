@@ -12,6 +12,7 @@ import type { SettlementService } from './settlement.service.js';
 import type { ServicesClient, UsersClient } from '../common/clients/index.js';
 import type { ConfigService } from '@nestjs/config';
 import type { CommissionService } from './commission.service.js';
+import { PaymentSecrets } from './payment-secrets.js';
 import type { MercadoPagoConnectService } from './mercadopago/mercadopago-connect.service.js';
 
 const WEBHOOK_SECRET = 'mp-webhook-secret';
@@ -73,6 +74,11 @@ function make(settings: Record<string, unknown> = {}) {
     commission as unknown as CommissionService,
     mercadoPago as unknown as MercadoPagoAdapter,
     connect as unknown as MercadoPagoConnectService,
+    // No key: values pass through as plain text, as in development.
+    new PaymentSecrets(
+      { get: () => undefined } as unknown as ConfigService,
+      prisma as unknown as PrismaService,
+    ),
   );
   return {
     service,

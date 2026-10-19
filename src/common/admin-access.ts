@@ -188,6 +188,27 @@ export async function businessAdminSeller(
   return admin.sellerId;
 }
 
+/**
+ * A signed-in business seller (STARTUP or COMPANY), for what a business sets
+ * up for itself on the web, like its payout account. Signing in already
+ * requires EKORU's approval of the business.
+ */
+export async function assertBusinessSeller(
+  prisma: PrismaService,
+  sellerId: string,
+): Promise<string> {
+  const rows = await prisma.$queryRaw<{ sellerType: string }[]>`
+    SELECT "sellerType"::text AS "sellerType"
+    FROM "Seller"
+    WHERE "id" = ${sellerId}
+    LIMIT 1`;
+  const type = rows[0]?.sellerType;
+  if (type !== 'STARTUP' && type !== 'COMPANY') {
+    throw new ForbiddenError('Solo una cuenta de empresa puede hacer esto');
+  }
+  return sellerId;
+}
+
 /** The session seller, or UNAUTHORIZED. For `my*` queries. */
 export function requireSeller(sellerId: string | undefined): string {
   if (!sellerId) throw new UnauthorizedError('Debe iniciar sesión');

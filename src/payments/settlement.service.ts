@@ -23,6 +23,7 @@ import { BadRequestError, NotFoundError } from '../common/exceptions/index.js';
 import { ProviderRegistry } from './providers/index.js';
 import { ChileanPaymentProvider } from '../graphql/enums/index.js';
 import { PAYMENT_JOBS, PAYMENT_QUEUE } from './payment-queue.js';
+import { PaymentSecrets } from './payment-secrets.js';
 
 /** Retry policy for jobs that call another service. */
 const RETRY = {
@@ -77,6 +78,7 @@ export class SettlementService {
     @InjectQueue(PAYMENT_QUEUE) private readonly queue: Queue,
     private readonly users: UsersClient,
     private readonly config: ConfigService,
+    private readonly secrets: PaymentSecrets,
   ) {}
 
   // ─── Completion ───────────────────────────────────────────────────────────
@@ -478,12 +480,7 @@ export class SettlementService {
       externalId: payment.externalId,
       externalToken: payment.externalToken,
       amount: refund.amount,
-      config: {
-        environment: config.environment,
-        merchantId: config.merchantId,
-        apiKey: config.apiKey,
-        secretKey: config.secretKey,
-      },
+      config: this.secrets.credentials(config),
     });
     if (!result.ok) {
       await this.finishFailed(

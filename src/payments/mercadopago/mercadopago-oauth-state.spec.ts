@@ -12,7 +12,8 @@ const NOW = 1_760_000_000_000;
 describe('Mercado Pago connect state', () => {
   const content = {
     sellerId: 'seller-1',
-    adminId: 'admin-1',
+    actor: 'admin:admin-1',
+    surface: 'panel' as const,
     expiresAt: NOW + 60_000,
   };
 

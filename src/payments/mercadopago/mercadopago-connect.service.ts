@@ -11,9 +11,11 @@ import {
   PaymentEnvironment,
 } from '../../graphql/enums/index.js';
 import { CommissionService } from '../commission.service.js';
+import { PaymentSecrets } from '../payment-secrets.js';
 import { MercadoPagoApi, MercadoPagoApiError } from './mercadopago.api.js';
 import {
   CONNECT_STATE_TTL_MS,
+  type ConnectSurface,
   pkceChallenge,
   pkceVerifier,
   readConnectState,
@@ -53,6 +55,7 @@ export class MercadoPagoConnectService {
     private readonly config: ConfigService,
     private readonly api: MercadoPagoApi,
     private readonly commission: CommissionService,
+    private readonly secrets: PaymentSecrets,
   ) {}
 
   async status(sellerId: string): Promise<StorePaymentSetupView> {
@@ -88,17 +91,28 @@ export class MercadoPagoConnectService {
     };
   }
 
-  /** The Mercado Pago authorization page this store's admin is sent to. */
+  /**
+   * The Mercado Pago authorization page the store is sent to. It comes back to
+   * the surface it started from: the panel's business area or the web
+   * profile, each with its own registered redirect URL.
+   */
   authorizationUrl({
     sellerId,
-    adminId,
+    actor,
+    surface,
   }: {
     sellerId: string;
-    adminId: string;
+    actor: string;
+    surface: ConnectSurface;
   }): string {
-    const { clientId, redirectUri } = this.appSettings();
+    const { clientId, redirectUri } = this.appSettings(surface);
     const state = signConnectState(
-      { sellerId, adminId, expiresAt: Date.now() + CONNECT_STATE_TTL_MS },
+      {
+        sellerId,
+        actor,
+        surface,
+        expiresAt: Date.now() + CONNECT_STATE_TTL_MS,
+      },
       this.stateKey(),
     );
     const url = new URL(
@@ -126,17 +140,17 @@ export class MercadoPagoConnectService {
   /**
    * Finishes the connection with the code Mercado Pago sent back. The state
    * must be one this service signed, still fresh, for this same store and
-   * started by this same admin, so a code cannot be grafted onto another
+   * started by this same person, so a code cannot be grafted onto another
    * store's session.
    */
   async complete({
     sellerId,
-    adminId,
+    actor,
     code,
     state,
   }: {
     sellerId: string;
-    adminId: string;
+    actor: string;
     code: string;
     state: string;
   }): Promise<StorePaymentSetupView> {
@@ -146,13 +160,14 @@ export class MercadoPagoConnectService {
         'El enlace de Mercado Pago expiró o no es válido. Vuelve a conectar.',
       );
     }
-    if (content.sellerId !== sellerId || content.adminId !== adminId) {
+    if (content.sellerId !== sellerId || content.actor !== actor) {
       throw new BadRequestError(
         'Esta conexión la inició otra cuenta. Vuelve a conectar desde aquí.',
       );
     }
 
-    const { redirectUri } = this.appSettings();
+    // The token exchange must name the same redirect URL the store was sent with.
+    const { redirectUri } = this.appSettings(content.surface);
     let token;
     try {
       token = await this.api.exchangeCode({
@@ -174,8 +189,8 @@ export class MercadoPagoConnectService {
 
     const data = {
       merchantId: String(token.user_id),
-      secretKey: token.access_token,
-      refreshToken: token.refresh_token,
+      secretKey: this.secrets.seal(token.access_token),
+      refreshToken: this.secrets.seal(token.refresh_token),
       tokenExpiresAt: new Date(Date.now() + token.expires_in * 1000),
       publicKey: token.public_key,
       environment: token.live_mode
@@ -242,12 +257,14 @@ export class MercadoPagoConnectService {
     let paused = 0;
     for (const row of rows) {
       try {
-        const token = await this.api.refreshToken(row.refreshToken!);
+        const token = await this.api.refreshToken(
+          this.secrets.open(row.refreshToken)!,
+        );
         await this.prisma.chileanPaymentConfig.update({
           where: { id: row.id },
           data: {
-            secretKey: token.access_token,
-            refreshToken: token.refresh_token,
+            secretKey: this.secrets.seal(token.access_token),
+            refreshToken: this.secrets.seal(token.refresh_token),
             tokenExpiresAt: new Date(Date.now() + token.expires_in * 1000),
             publicKey: token.public_key,
           },
@@ -281,12 +298,23 @@ export class MercadoPagoConnectService {
 
   // ─── helpers ──────────────────────────────────────────────────────────────
 
-  private appSettings(): { clientId: string; redirectUri: string } {
+  private appSettings(surface: ConnectSurface): {
+    clientId: string;
+    redirectUri: string;
+  } {
     const clientId = this.config.get<string>('mercadoPago.clientId');
-    const redirectUri = this.config.get<string>('mercadoPago.redirectUri');
+    const redirectUri = this.config.get<string>(
+      surface === 'web'
+        ? 'mercadoPago.webRedirectUri'
+        : 'mercadoPago.redirectUri',
+    );
     if (!clientId || !redirectUri || !this.secret()) {
       throw new InternalServerError(
-        'Mercado Pago no está configurado (MERCADOPAGO_CLIENT_ID, MERCADOPAGO_CLIENT_SECRET, MERCADOPAGO_REDIRECT_URI)',
+        `Mercado Pago no está configurado (MERCADOPAGO_CLIENT_ID, MERCADOPAGO_CLIENT_SECRET, ${
+          surface === 'web'
+            ? 'MERCADOPAGO_WEB_REDIRECT_URI'
+            : 'MERCADOPAGO_REDIRECT_URI'
+        })`,
       );
     }
     return { clientId, redirectUri };

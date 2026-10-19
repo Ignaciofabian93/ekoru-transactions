@@ -1,5 +1,6 @@
 import {
   assertAdminCan,
+  assertBusinessSeller,
   assertPartyOrAdmin,
   businessAdminSeller,
   requireSeller,
@@ -248,5 +249,32 @@ describe('businessAdminSeller (TRX-5)', () => {
         }),
       ),
     ).toBe('UNAUTHORIZED');
+  });
+});
+
+describe('assertBusinessSeller (WEB-2)', () => {
+  const withType = (sellerType?: string) =>
+    ({
+      $queryRaw: jest
+        .fn()
+        .mockResolvedValue(sellerType ? [{ sellerType }] : []),
+    }) as unknown as PrismaService;
+
+  it('lets a business set up its own payouts', async () => {
+    await expect(assertBusinessSeller(withType('COMPANY'), 's1')).resolves.toBe(
+      's1',
+    );
+    await expect(assertBusinessSeller(withType('STARTUP'), 's1')).resolves.toBe(
+      's1',
+    );
+  });
+
+  it('refuses a person and an unknown seller', async () => {
+    expect(await codeOf(assertBusinessSeller(withType('PERSON'), 's1'))).toBe(
+      'FORBIDDEN',
+    );
+    expect(await codeOf(assertBusinessSeller(withType(), 's1'))).toBe(
+      'FORBIDDEN',
+    );
   });
 });

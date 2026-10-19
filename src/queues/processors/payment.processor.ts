@@ -11,6 +11,7 @@ import { PAYMENT_JOBS, PAYMENT_QUEUE } from '../../payments/payment-queue.js';
 import { SettlementService } from '../../payments/settlement.service.js';
 import { PaymentsService } from '../../payments/payments.service.js';
 import { MercadoPagoConnectService } from '../../payments/mercadopago/mercadopago-connect.service.js';
+import { PaymentSecrets } from '../../payments/payment-secrets.js';
 
 interface RefundJob {
   refundId: number;
@@ -55,11 +56,19 @@ export class PaymentProcessor extends WorkerHost implements OnModuleInit {
     @InjectQueue(PAYMENT_QUEUE) private readonly queue: Queue,
     private readonly payments: PaymentsService,
     private readonly mercadoPagoConnect: MercadoPagoConnectService,
+    private readonly secrets: PaymentSecrets,
   ) {
     super();
   }
 
   async onModuleInit(): Promise<void> {
+    // Credentials stored before PAYMENT_SECRETS_KEY existed get sealed (TRX-21).
+    await this.secrets
+      .sealExistingRows()
+      .catch((error: unknown) =>
+        this.logger.error('Could not seal stored payment secrets', error),
+      );
+
     const everyMin = this.config.get<number>(
       'payments.expireSweepEveryMin',
       10,

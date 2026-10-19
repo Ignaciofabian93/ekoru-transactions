@@ -45,6 +45,12 @@ export default () => ({
    */
   payments: {
     /**
+     * Seals provider secrets at rest (TRX-21): 32 bytes, base64
+     * (`openssl rand -base64 32`). Required in production; losing it makes the
+     * stored tokens unreadable, so it lives in Infisical with the backups.
+     */
+    secretsKey: process.env.PAYMENT_SECRETS_KEY,
+    /**
      * Providers buyers can pay with, comma-separated, first one is the default
      * for memberships. Mercado Pago only since 2026-10-19 (D1); Webpay stays
      * built and comes back by adding it here (`MERCADOPAGO,WEBPAY`).
@@ -78,6 +84,9 @@ export default () => ({
     clientId: process.env.MERCADOPAGO_CLIENT_ID,
     clientSecret: process.env.MERCADOPAGO_CLIENT_SECRET,
     redirectUri: process.env.MERCADOPAGO_REDIRECT_URI,
+    // The web profile's payout page (`/profile/payments`), for businesses
+    // that connect from the web or the app instead of the panel.
+    webRedirectUri: process.env.MERCADOPAGO_WEB_REDIRECT_URI,
     webhookSecret: process.env.MERCADOPAGO_WEBHOOK_SECRET,
     environment:
       process.env.MERCADOPAGO_ENVIRONMENT === 'PRODUCTION'
