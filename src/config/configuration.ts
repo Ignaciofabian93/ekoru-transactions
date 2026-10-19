@@ -92,10 +92,12 @@ export default () => ({
      * autorización con PKCE" in the application; set false only if it is off.
      */
     usePkce: process.env.MERCADOPAGO_USE_PKCE !== 'false',
-    /** Ask for test credentials on connect (`test_token`). Defaults to SANDBOX. */
-    testToken: process.env.MERCADOPAGO_TEST_TOKEN
-      ? process.env.MERCADOPAGO_TEST_TOKEN === 'true'
-      : process.env.MERCADOPAGO_ENVIRONMENT !== 'PRODUCTION',
+    /**
+     * Ask for TEST- credentials on connect (`test_token`). Off by default:
+     * Checkout Pro has no test credentials, so staging uses the production
+     * credentials of Mercado Pago test accounts (an "Integrador" owns the app).
+     */
+    testToken: process.env.MERCADOPAGO_TEST_TOKEN === 'true',
     /** Access tokens last 180 days; refresh the ones expiring within this window. */
     refreshWithinDays: parseInt(
       process.env.MERCADOPAGO_REFRESH_WITHIN_DAYS || '30',

@@ -28,10 +28,19 @@ buyer ──pays──▶ store's own Mercado Pago account
 
 ## 2. One-time setup in Mercado Pago
 
-All of this happens in EKORU SpA's account, under
+There are two applications, because Checkout Pro has no test credentials:
+- **Production:** in EKORU SpA's real account. Mercado Pago asks for a seller
+  account with identity verification at KYC level 6.
+- **Staging:** in an **Integrador** test account, created from the production
+  application's Cuentas de prueba. Test stores and test buyers can only pay
+  each other, so the staging application's owner must be a test account too.
+
+Do the steps below for each one, in
 [Tus integraciones](https://www.mercadopago.cl/developers/panel/app).
 
-1. **Create the application.** Product: Checkout Pro, marketplace model.
+1. **Create the application.** Choose Pagos online, then "No" to an
+   e-commerce platform, then the product Checkout Pro and the Marketplace
+   model.
 2. **Redirect URLs** (Detalles de aplicación → Editar). Add both, exactly:
    - `https://admin.ekoru.cl/payment-setup`
    - the staging panel's `…/payment-setup`
@@ -55,7 +64,7 @@ All of this happens in EKORU SpA's account, under
 | `MERCADOPAGO_WEBHOOK_SECRET` | webhook secret | webhook secret |
 | `MERCADOPAGO_ENVIRONMENT` | `SANDBOX` | `PRODUCTION` |
 | `MERCADOPAGO_USE_PKCE` | optional, default `true` | optional, default `true` |
-| `MERCADOPAGO_TEST_TOKEN` | optional, defaults to `true` in SANDBOX | optional |
+| `MERCADOPAGO_TEST_TOKEN` | leave unset (`false`) | leave unset |
 
 `GATEWAY_BASE_URL` must be the gateway's public URL: it builds the webhook URL
 on each preference. Without `MERCADOPAGO_WEBHOOK_SECRET` every webhook is
@@ -81,8 +90,9 @@ EKORU's platform seller (`EKORU_PLATFORM_SELLER_ID`) needs its own MERCADOPAGO
 row in **Configuración de pagos**:
 
 - `merchantId`: EKORU's Mercado Pago user id.
-- `secretKey`: EKORU's production access token (`APP_USR-…`). On staging, use a
-  test account's token.
+- `secretKey`: EKORU's production access token (`APP_USR-…`), from Producción →
+  Credenciales de producción. On staging, use the Integrador test account's
+  production access token, with its user id as `merchantId`.
 - `environment`: PRODUCTION on prod, SANDBOX on staging.
 
 ## 6. What happens when
@@ -120,13 +130,15 @@ row in **Configuración de pagos**:
 
 ## 7. Testing on staging
 
-1. In Tus integraciones → Cuentas de prueba, create a **seller** and a **buyer**
-   test account.
+1. In the production application's Cuentas de prueba, create three test
+   accounts, all in Chile:
+   - an **Integrador**, which owns the staging application (§2);
+   - a **Vendedor**, which plays a store;
+   - a **Comprador**, which plays a buyer.
 2. Sign in to the panel as a BUSINESS admin of a test store, open **Cobros** and
-   connect while signed in to Mercado Pago as the test seller.
-   `MERCADOPAGO_ENVIRONMENT=SANDBOX` asks for test credentials (`test_token`).
-   If the exchange is refused, set `MERCADOPAGO_TEST_TOKEN=false` and connect
-   again.
+   connect while signed in to Mercado Pago as the test Vendedor. Use a private
+   window, so you are not signed in as EKORU. The connection uses the test
+   accounts' production credentials, so `test_token` stays off.
 3. Buy as the test buyer with Mercado Pago's test cards.
 4. Check the results:
    - the order is PAID;

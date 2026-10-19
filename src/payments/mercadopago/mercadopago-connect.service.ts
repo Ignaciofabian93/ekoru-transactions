@@ -312,9 +312,6 @@ export class MercadoPagoConnectService {
   }
 
   private useTestToken(): boolean {
-    return this.config.get<boolean>(
-      'mercadoPago.testToken',
-      this.config.get<string>('mercadoPago.environment') !== 'PRODUCTION',
-    );
+    return this.config.get<boolean>('mercadoPago.testToken', false);
   }
 }
