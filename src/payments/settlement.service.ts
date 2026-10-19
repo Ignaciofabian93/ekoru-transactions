@@ -474,6 +474,7 @@ export class SettlementService {
 
     const result = await adapter.refund({
       paymentId: payment.id,
+      refundId,
       externalId: payment.externalId,
       externalToken: payment.externalToken,
       amount: refund.amount,

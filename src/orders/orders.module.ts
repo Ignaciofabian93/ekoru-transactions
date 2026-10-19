@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { OrdersService } from './orders.service.js';
 import { OrdersResolver, OrderItemResolver } from './orders.resolver.js';
+import { SellerPaymentsResolver } from './seller-payments.resolver.js';
 import { PrismaModule } from '../prisma/prisma.module.js';
 import {
   MarketplaceClient,
@@ -14,6 +15,7 @@ import {
     OrdersService,
     OrdersResolver,
     OrderItemResolver,
+    SellerPaymentsResolver,
     MarketplaceClient,
     StoresClient,
     // Order lifecycle emails — users owns the templates and the preference gate.

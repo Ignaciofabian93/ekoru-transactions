@@ -15,6 +15,7 @@ import {
 } from '../common/utils/index.js';
 import { ConfigService } from '@nestjs/config';
 import {
+  ChileanPaymentProvider as DbPaymentProvider,
   OrderStatus as DbOrderStatus,
   Prisma,
   TransactionKind,
@@ -131,6 +132,26 @@ export class OrdersService {
     private readonly users: UsersClient,
     private readonly config: ConfigService,
   ) {}
+
+  /**
+   * Whether buyers can pay this seller online now (TRX-4): an active payout
+   * connection for a provider that is switched on (`PAYMENT_PROVIDERS`). A
+   * Mercado Pago connection also needs its access token.
+   */
+  async canReceivePayments(sellerId: string): Promise<boolean> {
+    const enabled = this.config.get<DbPaymentProvider[]>(
+      'payments.enabledProviders',
+    ) ?? [DbPaymentProvider.MERCADOPAGO];
+    const count = await this.prisma.chileanPaymentConfig.count({
+      where: {
+        sellerId,
+        isActive: true,
+        provider: { in: enabled },
+        NOT: { provider: DbPaymentProvider.MERCADOPAGO, secretKey: null },
+      },
+    });
+    return count > 0;
+  }
 
   async getOrder(id: number) {
     try {
@@ -300,6 +321,13 @@ export class OrdersService {
     }
     if (sellerId === buyerId) {
       throw new BadRequestError('No puedes comprarte productos a ti mismo');
+    }
+    // TRX-4: refuse before writing anything, not at the payment step with an
+    // unpaid order left behind.
+    if (!(await this.canReceivePayments(sellerId))) {
+      throw new BadRequestError(
+        'Este vendedor todavía no recibe pagos en línea. Vuelve a intentarlo más adelante.',
+      );
     }
 
     // 4. Compute totals from canonical prices. Store products honour an active

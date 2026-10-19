@@ -1,6 +1,7 @@
 import {
   assertAdminCan,
   assertPartyOrAdmin,
+  businessAdminSeller,
   requireSeller,
   sellerScope,
 } from './admin-access.js';
@@ -184,5 +185,68 @@ describe('requireSeller', () => {
   it('refuses a missing session instead of filtering on undefined', () => {
     expect(() => requireSeller(undefined)).toThrow();
     expect(requireSeller('s1')).toBe('s1');
+  });
+});
+
+describe('businessAdminSeller (TRX-5)', () => {
+  const business = (row: Partial<Row> & { sellerId?: string | null }) =>
+    prismaWith({
+      adminType: 'BUSINESS',
+      role: 'BUSINESS_SUPPORT',
+      sellerId: 'store-1',
+      ...row,
+    } as Partial<Row>);
+
+  it("returns a business admin's own store", async () => {
+    await expect(
+      businessAdminSeller(business({}), { adminId: 'a1', manage: false }),
+    ).resolves.toBe('store-1');
+  });
+
+  it('lets only the owner or a profile manager change it', async () => {
+    expect(
+      await codeOf(
+        businessAdminSeller(business({}), { adminId: 'a1', manage: true }),
+      ),
+    ).toBe('FORBIDDEN');
+    await expect(
+      businessAdminSeller(business({ role: 'BUSINESS_OWNER' }), {
+        adminId: 'a1',
+        manage: true,
+      }),
+    ).resolves.toBe('store-1');
+    await expect(
+      businessAdminSeller(
+        business({ permissions: ['MANAGE_BUSINESS_PROFILE'] }),
+        { adminId: 'a1', manage: true },
+      ),
+    ).resolves.toBe('store-1');
+  });
+
+  it('refuses platform admins, inactive admins and the signed out', async () => {
+    expect(
+      await codeOf(
+        businessAdminSeller(prismaWith({ role: 'SUPER_ADMIN' }), {
+          adminId: 'a1',
+          manage: false,
+        }),
+      ),
+    ).toBe('FORBIDDEN');
+    expect(
+      await codeOf(
+        businessAdminSeller(business({ isActive: false }), {
+          adminId: 'a1',
+          manage: false,
+        }),
+      ),
+    ).toBe('FORBIDDEN');
+    expect(
+      await codeOf(
+        businessAdminSeller(business({}), {
+          adminId: undefined,
+          manage: false,
+        }),
+      ),
+    ).toBe('UNAUTHORIZED');
   });
 });

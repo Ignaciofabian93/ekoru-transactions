@@ -197,6 +197,8 @@ model Payment {
   description                       String?
   fees                              Float?                 @default(0)
   netAmount                         Float?
+  // EKORU's commission rate (TransactionFee) when the payment was created; `fees` is that share in money.
+  feePercentage                     Float?
   payerId                           String
   receiverId                        String
   failureReason                     String?
@@ -260,24 +262,31 @@ model PaymentTransaction {
 }
 
 model ChileanPaymentConfig {
-  id          Int                    @id @default(autoincrement())
-  sellerId    String
-  provider    ChileanPaymentProvider
-  merchantId  String?
-  apiKey      String?
-  secretKey   String?
-  environment PaymentEnvironment     @default(SANDBOX)
-  isActive    Boolean                @default(true)
-  webhookUrl  String?
-  returnUrl   String?
-  cancelUrl   String?
-  createdAt   DateTime               @default(now())
-  updatedAt   DateTime               @updatedAt
-  payment     Payment[]
+  id             Int                    @id @default(autoincrement())
+  sellerId       String
+  provider       ChileanPaymentProvider
+  // Webpay: commerce code. Mercado Pago: the connected account's user id (collector_id).
+  merchantId     String?
+  apiKey         String?
+  // Webpay: API key secret. Mercado Pago: the OAuth access token of the connected account.
+  secretKey      String?
+  // Mercado Pago OAuth only: exchanged for a new access token before `tokenExpiresAt`.
+  refreshToken   String?
+  tokenExpiresAt DateTime?
+  publicKey      String?
+  environment    PaymentEnvironment     @default(SANDBOX)
+  isActive       Boolean                @default(true)
+  webhookUrl     String?
+  returnUrl      String?
+  cancelUrl      String?
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+  payment        Payment[]
 
   @@unique([sellerId, provider])
   @@index([provider])
   @@index([sellerId])
+  @@index([provider, merchantId])
 }
 
 model PaymentWebhook {

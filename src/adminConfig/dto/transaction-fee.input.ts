@@ -1,12 +1,20 @@
 import { Field, InputType, ID, Float } from '@nestjs/graphql';
-import { IsEnum, IsNumber, IsOptional, IsString, Min } from 'class-validator';
+import {
+  IsEnum,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+} from 'class-validator';
 import { SellerType } from '../../graphql/enums/index.js';
 
 /**
  * Bulk upsert row for `TransactionFee`, designed for XLSX round-trips and
  * single-row edits from the admin panel:
  * - `id` present → update that row (only the provided fields change)
- * - no `id`      → create (all fields required)
+ * - no `id`      → update the seller type's rate if it has one, else create
+ *                  (all fields required)
  *
  * Omitted fields are left untouched on update.
  */
@@ -26,11 +34,14 @@ export class TransactionFeeUpsertRowInput {
 
   @Field(() => Float, {
     nullable: true,
-    description: 'Fee as a fraction (e.g. 0.05 = 5%). Required when creating.',
+    description:
+      "EKORU's commission as a fraction (e.g. 0.05 = 5%), charged on every order and quotation payment to this seller type. Required when creating.",
   })
   @IsOptional()
   @IsNumber()
   @Min(0)
+  // 1 or more is a percent typed as a fraction (5 for 5%), never a real rate.
+  @Max(0.99, { message: 'feePercentage es una fracción: 0.05 = 5%' })
   feePercentage?: number;
 
   @Field(() => String, {

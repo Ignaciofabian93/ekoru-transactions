@@ -17,6 +17,7 @@ function make(order: Record<string, unknown> | null, adminRow?: object) {
       findMany: jest.fn().mockResolvedValue([]),
     },
     shippingStatus: { update: jest.fn().mockResolvedValue({}) },
+    chileanPaymentConfig: { count: jest.fn().mockResolvedValue(0) },
     $queryRaw: jest.fn().mockResolvedValue(adminRow ? [adminRow] : []),
   };
   const service = new OrdersService(
@@ -173,6 +174,28 @@ describe('OrdersService', () => {
         where: { id: 42, status: 'PENDING_PAYMENT' },
         data: { status: 'PAID' },
       });
+    });
+  });
+
+  describe('canReceivePayments (TRX-4)', () => {
+    it('needs an active connection for a switched-on provider, with a token for Mercado Pago', async () => {
+      const { service, prisma } = make(null);
+      prisma.chileanPaymentConfig.count.mockResolvedValue(1);
+
+      await expect(service.canReceivePayments('store')).resolves.toBe(true);
+      expect(prisma.chileanPaymentConfig.count).toHaveBeenCalledWith({
+        where: {
+          sellerId: 'store',
+          isActive: true,
+          provider: { in: ['MERCADOPAGO'] },
+          NOT: { provider: 'MERCADOPAGO', secretKey: null },
+        },
+      });
+    });
+
+    it('is false without one', async () => {
+      const { service } = make(null);
+      await expect(service.canReceivePayments('store')).resolves.toBe(false);
     });
   });
 });

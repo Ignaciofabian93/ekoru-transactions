@@ -44,12 +44,61 @@ export default () => ({
    * about ten minutes, so an hour never cuts off a buyer who is paying.
    */
   payments: {
+    /**
+     * Providers buyers can pay with, comma-separated, first one is the default
+     * for memberships. Mercado Pago only since 2026-10-19 (D1); Webpay stays
+     * built and comes back by adding it here (`MERCADOPAGO,WEBPAY`).
+     */
+    enabledProviders: (process.env.PAYMENT_PROVIDERS || 'MERCADOPAGO')
+      .split(',')
+      .map((p) => p.trim().toUpperCase())
+      .filter(Boolean),
     expireAfterMinutes: parseInt(
       process.env.PAYMENT_EXPIRE_MINUTES || '60',
       10,
     ),
     expireSweepEveryMin: parseInt(
       process.env.PAYMENT_EXPIRE_SWEEP_MINUTES || '10',
+      10,
+    ),
+  },
+  /**
+   * EKORU's Mercado Pago application (TRX-5). Stores connect their own
+   * Mercado Pago account to it with OAuth, buyers pay the store directly, and
+   * EKORU's commission is split off at source (`marketplace_fee`).
+   *   - clientId / clientSecret: the application's credentials.
+   *   - redirectUri: the panel page Mercado Pago sends the store back to; it
+   *     must match one of the application's redirect URLs exactly.
+   *   - webhookSecret: the application's webhook signing secret (Webhooks >
+   *     Configurar notificaciones). Without it every webhook is refused.
+   *   - environment: SANDBOX connects test accounts (test_token), PRODUCTION
+   *     real ones. Stored on each connection.
+   */
+  mercadoPago: {
+    clientId: process.env.MERCADOPAGO_CLIENT_ID,
+    clientSecret: process.env.MERCADOPAGO_CLIENT_SECRET,
+    redirectUri: process.env.MERCADOPAGO_REDIRECT_URI,
+    webhookSecret: process.env.MERCADOPAGO_WEBHOOK_SECRET,
+    environment:
+      process.env.MERCADOPAGO_ENVIRONMENT === 'PRODUCTION'
+        ? 'PRODUCTION'
+        : 'SANDBOX',
+    authBaseUrl:
+      process.env.MERCADOPAGO_AUTH_BASE_URL || 'https://auth.mercadopago.com',
+    apiBaseUrl:
+      process.env.MERCADOPAGO_API_BASE_URL || 'https://api.mercadopago.com',
+    /**
+     * PKCE on the authorization code flow. Turn on "flujo de código de
+     * autorización con PKCE" in the application; set false only if it is off.
+     */
+    usePkce: process.env.MERCADOPAGO_USE_PKCE !== 'false',
+    /** Ask for test credentials on connect (`test_token`). Defaults to SANDBOX. */
+    testToken: process.env.MERCADOPAGO_TEST_TOKEN
+      ? process.env.MERCADOPAGO_TEST_TOKEN === 'true'
+      : process.env.MERCADOPAGO_ENVIRONMENT !== 'PRODUCTION',
+    /** Access tokens last 180 days; refresh the ones expiring within this window. */
+    refreshWithinDays: parseInt(
+      process.env.MERCADOPAGO_REFRESH_WITHIN_DAYS || '30',
       10,
     ),
   },

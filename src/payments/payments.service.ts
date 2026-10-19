@@ -29,8 +29,13 @@ import {
   PaymentType,
 } from '../graphql/enums/index.js';
 import { OrdersService } from '../orders/orders.service.js';
-import { ProviderRegistry } from './providers/index.js';
+import { MercadoPagoAdapter, ProviderRegistry } from './providers/index.js';
+import type { ConfirmPaymentResult } from './providers/index.js';
 import { SettlementService } from './settlement.service.js';
+import { CommissionService } from './commission.service.js';
+import { MercadoPagoConnectService } from './mercadopago/mercadopago-connect.service.js';
+import { verifyMercadoPagoSignature } from './mercadopago/mercadopago-signature.js';
+import { paymentIdFromReference } from './providers/mercadopago.adapter.js';
 
 // Kept as a re-export for the processor and module that import it from here.
 export { PAYMENT_QUEUE } from './payment-queue.js';
@@ -45,6 +50,40 @@ const FINAL_PAYMENT_STATUSES: PrismaPaymentStatus[] = [
   PrismaPaymentStatus.PARTIALLY_REFUNDED,
 ];
 
+/**
+ * Mercado Pago outcomes that do not end a checkout. On Checkout Pro a buyer
+ * whose card is rejected can retry on the same page, so a FAILED payment may
+ * still be approved by a later attempt. EXPIRED is our own timeout, not a
+ * provider outcome, so a charge can still land on it as the window closes.
+ * Webpay has neither: one form, one commit.
+ */
+const MERCADOPAGO_REOPENABLE: PrismaPaymentStatus[] = [
+  PrismaPaymentStatus.FAILED,
+  PrismaPaymentStatus.EXPIRED,
+];
+
+/** Whether the provider may no longer change a payment. */
+function isSettled(
+  status: PrismaPaymentStatus,
+  provider: ChileanPaymentProvider,
+): boolean {
+  if (
+    provider === ChileanPaymentProvider.MERCADOPAGO &&
+    MERCADOPAGO_REOPENABLE.includes(status)
+  ) {
+    return false;
+  }
+  return FINAL_PAYMENT_STATUSES.includes(status);
+}
+
+/** A non-empty string (or a number) from an untyped payload, else undefined. */
+const str = (value: unknown): string | undefined =>
+  typeof value === 'string' && value.trim()
+    ? value.trim()
+    : typeof value === 'number'
+      ? String(value)
+      : undefined;
+
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
@@ -57,7 +96,30 @@ export class PaymentsService {
     private readonly config: ConfigService,
     private readonly settlement: SettlementService,
     private readonly services: ServicesClient,
+    private readonly commission: CommissionService,
+    private readonly mercadoPago: MercadoPagoAdapter,
+    private readonly mercadoPagoConnect: MercadoPagoConnectService,
   ) {}
+
+  /** Providers buyers may pay with now (`PAYMENT_PROVIDERS`); Webpay waits as a future option. */
+  enabledProviders(): ChileanPaymentProvider[] {
+    const configured = this.config.get<string[]>(
+      'payments.enabledProviders',
+    ) ?? [ChileanPaymentProvider.MERCADOPAGO];
+    const known = Object.values(ChileanPaymentProvider) as string[];
+    return configured.filter((p) =>
+      known.includes(p),
+    ) as ChileanPaymentProvider[];
+  }
+
+  private _assertProviderEnabled(provider: ChileanPaymentProvider): void {
+    const enabled = this.enabledProviders();
+    if (!enabled.includes(provider)) {
+      throw new BadRequestError(
+        `${provider} no está habilitado. Paga con ${enabled.join(' o ') || 'otro medio'}.`,
+      );
+    }
+  }
 
   // ─── Payment Config ───────────────────────────────────────────────────────
 
@@ -238,6 +300,7 @@ export class PaymentsService {
     if (!payerId) {
       throw new BadRequestError('Debe iniciar sesión para pagar');
     }
+    this._assertProviderEnabled(input.provider);
 
     // 1. Load + validate the order.
     const order = await this.prisma.order.findUnique({
@@ -275,7 +338,13 @@ export class PaymentsService {
       );
     }
 
-    // 3. Persist a PENDING Payment row first so we have an id for the
+    // 3. EKORU's commission for this seller (TRX-10), kept on the payment.
+    const commission = await this.commission.quote({
+      sellerId: order.sellerId,
+      amount: order.total,
+    });
+
+    // 4. Persist a PENDING Payment row first so we have an id for the
     //    provider's external_reference.
     const payment = await this.prisma.payment.create({
       data: {
@@ -289,12 +358,15 @@ export class PaymentsService {
         paymentType: PaymentType.ORDER,
         chileanConfigId: config.id,
         status: PaymentStatus.PROCESSING,
+        fees: commission.fee,
+        netAmount: commission.net,
+        feePercentage: commission.rate,
         updatedAt: new Date(),
       },
       select: PAYMENT_SELECT,
     });
 
-    // 4. Hand off to the provider adapter.
+    // 5. Hand off to the provider adapter.
     const adapter = this.providers.for(input.provider);
     let initiate: Awaited<ReturnType<typeof adapter.initiate>>;
     try {
@@ -305,6 +377,7 @@ export class PaymentsService {
         currency: order.currency,
         description: `Orden Ekoru #${order.id}`,
         returnUrl: input.returnUrl,
+        platformFee: commission.fee,
         config: {
           environment: config.environment,
           merchantId: config.merchantId,
@@ -324,7 +397,7 @@ export class PaymentsService {
       throw err;
     }
 
-    // 5. Persist the provider's externalId/token.
+    // 6. Persist the provider's externalId/token.
     const updated = await this.prisma.payment.update({
       where: { id: payment.id },
       data: {
@@ -366,14 +439,17 @@ export class PaymentsService {
     membershipId,
     payerId,
     returnUrl,
+    provider = this.enabledProviders()[0] ?? ChileanPaymentProvider.MERCADOPAGO,
   }: {
     membershipId: number;
     payerId: string;
     returnUrl: string;
+    provider?: ChileanPaymentProvider;
   }) {
     if (!payerId) {
       throw new BadRequestError('Debe iniciar sesión para suscribirse');
     }
+    this._assertProviderEnabled(provider);
 
     const platformSellerId = this.config.get<string>('ekoruPlatformSellerId');
     if (!platformSellerId) {
@@ -383,17 +459,13 @@ export class PaymentsService {
     // 1. Price the term server-side (never from the client).
     const charge = await this.users.getMembershipCharge(membershipId, payerId);
 
-    // 2. Resolve EKORU's own WEBPAY config — this is the receiving account.
+    // 2. Resolve EKORU's own config for the provider — the receiving account.
     const config = await this.prisma.chileanPaymentConfig.findFirst({
-      where: {
-        sellerId: platformSellerId,
-        provider: ChileanPaymentProvider.WEBPAY,
-        isActive: true,
-      },
+      where: { sellerId: platformSellerId, provider, isActive: true },
     });
     if (!config) {
       throw new BadRequestError(
-        'EKORU no tiene Webpay configurado para cobros de plataforma',
+        `EKORU no tiene ${provider} configurado para cobros de plataforma`,
       );
     }
 
@@ -402,7 +474,7 @@ export class PaymentsService {
       data: {
         amount: charge.price,
         currency: charge.currency,
-        paymentProvider: ChileanPaymentProvider.WEBPAY,
+        paymentProvider: provider,
         description: `Suscripción EKORU (plan ${membershipId})`,
         payerId,
         receiverId: platformSellerId,
@@ -415,8 +487,8 @@ export class PaymentsService {
       select: PAYMENT_SELECT,
     });
 
-    // 4. Hand off to Webpay. No Order → pass 0 as the buyOrder seed.
-    const adapter = this.providers.for(ChileanPaymentProvider.WEBPAY);
+    // 4. Hand off to the provider. No Order → pass 0 as the buyOrder seed.
+    const adapter = this.providers.for(provider);
     let initiate: Awaited<ReturnType<typeof adapter.initiate>>;
     try {
       initiate = await adapter.initiate({
@@ -460,13 +532,13 @@ export class PaymentsService {
         action: 'INITIATE',
         amount: charge.price,
         status: PaymentStatus.PROCESSING,
-        description: 'Suscripción iniciada con WEBPAY',
+        description: `Suscripción iniciada con ${provider}`,
       },
     });
 
     return {
       paymentId: String(updated.id),
-      provider: ChileanPaymentProvider.WEBPAY,
+      provider,
       status: updated.status,
       redirect: initiate.redirect,
       payment: this._mapPayment(updated),
@@ -494,6 +566,7 @@ export class PaymentsService {
     if (!payerId) {
       throw new BadRequestError('Debe iniciar sesión para pagar');
     }
+    this._assertProviderEnabled(provider);
     const charge = await this.services.getQuotationCharge(quotationId);
     if (charge.clientId !== payerId) {
       throw new BadRequestError('Esta cotización no te pertenece');
@@ -521,6 +594,10 @@ export class PaymentsService {
       );
     }
 
+    const commission = await this.commission.quote({
+      sellerId: charge.providerId,
+      amount: charge.amount,
+    });
     const payment = await this.prisma.payment.create({
       data: {
         quotationId,
@@ -533,6 +610,9 @@ export class PaymentsService {
         paymentType: PaymentType.QUOTATION,
         chileanConfigId: config.id,
         status: PaymentStatus.PROCESSING,
+        fees: commission.fee,
+        netAmount: commission.net,
+        feePercentage: commission.rate,
         updatedAt: new Date(),
       },
       select: PAYMENT_SELECT,
@@ -549,6 +629,7 @@ export class PaymentsService {
         currency: charge.currency,
         description: `Cotización Ekoru #${quotationId}`,
         returnUrl,
+        platformFee: commission.fee,
         config: {
           environment: config.environment,
           merchantId: config.merchantId,
@@ -625,8 +706,9 @@ export class PaymentsService {
    * the buyer is redirected back from the provider. The gateway has already
    * authenticated the request as coming from itself (internal secret).
    *
-   * For Webpay this is the only commit signal (no webhook). For Khipu and
-   * MercadoPago it's informational — the webhook is authoritative.
+   * For Webpay this is the only commit signal (no webhook). Mercado Pago also
+   * sends a webhook; either one settles the payment, whichever arrives first,
+   * and both read the status back from Mercado Pago's API.
    */
   async handleProviderReturn({
     provider,
@@ -641,7 +723,7 @@ export class PaymentsService {
     }
     // A buyer reloading the return page sends it again. Transbank refuses a
     // second commit, which used to turn a COMPLETED payment into FAILED.
-    if (FINAL_PAYMENT_STATUSES.includes(payment.status)) {
+    if (isSettled(payment.status, provider)) {
       return {
         paymentId: payment.id,
         status: payment.status as unknown as PaymentStatus,
@@ -656,22 +738,59 @@ export class PaymentsService {
     const adapter = this.providers.for(provider);
     const result = await adapter.confirm({
       paymentId: payment.id,
+      amount: payment.amount,
       externalId: payment.externalId!,
       externalToken: payment.externalToken,
-      config: {
-        environment: config.environment,
-        merchantId: config.merchantId,
-        apiKey: config.apiKey,
-        secretKey: config.secretKey,
-      },
+      config: adapterConfig(config),
       rawPayload,
     });
 
+    // A buyer back from Mercado Pago without paying changes nothing: the
+    // payment waits for the webhook or the expiry sweep. A failed or expired
+    // one stays as it is unless the provider reports a real outcome.
+    if (
+      result.status === 'PROCESSING' &&
+      payment.status !== PrismaPaymentStatus.PENDING &&
+      payment.status !== PrismaPaymentStatus.PROCESSING
+    ) {
+      return {
+        paymentId: payment.id,
+        status: payment.status as unknown as PaymentStatus,
+      };
+    }
+
+    const status = await this._settle(payment, result, provider);
+    return { paymentId: payment.id, status };
+  }
+
+  /**
+   * Records what the provider said and runs what follows: an order paid or
+   * canceled, a quotation stamped paid, a membership activated.
+   */
+  private async _settle(
+    payment: {
+      id: number;
+      orderId: number | null;
+      paymentType: PrismaPaymentType;
+      payerId: string;
+      metadata: Prisma.JsonValue | null;
+    },
+    result: ConfirmPaymentResult,
+    provider: ChileanPaymentProvider,
+  ): Promise<PaymentStatus> {
     await this._applyTerminalStatus(
       payment.id,
       payment.orderId,
       result.status,
       result.raw,
+      result.providerPaymentId,
+      {
+        // A rejected Mercado Pago attempt leaves the order open for a retry on
+        // the same checkout; the expiry sweep closes it if none succeeds.
+        keepOrderOpen:
+          provider === ChileanPaymentProvider.MERCADOPAGO &&
+          result.status === 'FAILED',
+      },
     );
 
     // Platform (subscription) payments have no Order to mark paid — instead a
@@ -683,8 +802,7 @@ export class PaymentsService {
     ) {
       await this._activateMembership(payment);
     }
-
-    return { paymentId: payment.id, status };
+    return status;
   }
 
   /**
@@ -736,6 +854,8 @@ export class PaymentsService {
     rawPayload,
     rawBody,
     signature,
+    requestId,
+    query,
   }: {
     provider: ChileanPaymentProvider;
     eventType: string;
@@ -743,7 +863,21 @@ export class PaymentsService {
     /** Exact bytes the provider signed. The HMAC is over these, not over a re-serialization of `rawPayload`. */
     rawBody?: string;
     signature?: string;
+    /** Mercado Pago: the `x-request-id` header, part of what it signs. */
+    requestId?: string;
+    /** Mercado Pago: the notification URL's query (`data.id`, `type`, our `ekoru_payment` hint). */
+    query?: Record<string, unknown>;
   }): Promise<{ paymentId?: number; status?: PaymentStatus }> {
+    if (provider === ChileanPaymentProvider.MERCADOPAGO) {
+      return this._handleMercadoPagoWebhook({
+        eventType,
+        rawPayload,
+        signature,
+        requestId,
+        query: query ?? {},
+      });
+    }
+
     const externalId = this._extractExternalId(provider, rawPayload);
     const payment = externalId
       ? await this.prisma.payment.findFirst({
@@ -806,6 +940,203 @@ export class PaymentsService {
     return { paymentId: payment?.id };
   }
 
+  /**
+   * A Mercado Pago webhook (TRX-16). It only names a resource, so:
+   *   1. the `x-signature` must verify with EKORU's application secret, or
+   *      nothing happens (the attempt is still recorded);
+   *   2. the store's token is found from our `ekoru_payment` hint, or from
+   *      the account id Mercado Pago sends (`user_id`);
+   *   3. the payment is read back from Mercado Pago, and its reference must
+   *      be ours, before the status is applied.
+   * A forged or replayed notification can at most make us re-read a payment.
+   * `mp-connect` notifications tell us a store unlinked EKORU.
+   */
+  private async _handleMercadoPagoWebhook({
+    eventType,
+    rawPayload,
+    signature,
+    requestId,
+    query,
+  }: {
+    eventType: string;
+    rawPayload: Record<string, unknown>;
+    signature?: string;
+    requestId?: string;
+    query: Record<string, unknown>;
+  }): Promise<{ paymentId?: number; status?: PaymentStatus }> {
+    const provider = ChileanPaymentProvider.MERCADOPAGO;
+    const queryDataId = str(query['data.id']);
+    const resourceId =
+      queryDataId ?? str((rawPayload['data'] as { id?: unknown })?.id);
+    const type = str(rawPayload['type']) ?? str(query['type']) ?? eventType;
+    const hint = Number(str(query['ekoru_payment']));
+    const accountId = str(rawPayload['user_id']);
+
+    let payment = Number.isInteger(hint)
+      ? await this.prisma.payment.findFirst({
+          where: { id: hint, paymentProvider: provider },
+          select: RETURN_SELECT,
+        })
+      : null;
+
+    const webhook = await this.prisma.paymentWebhook.create({
+      data: {
+        paymentId: payment?.id,
+        provider,
+        eventType: type,
+        externalId: resourceId ?? 'unknown',
+        payload: rawPayload as Prisma.InputJsonValue,
+        processed: false,
+      },
+      select: { id: true },
+    });
+    const done = (data: { paymentId?: number; processingError?: string }) =>
+      this.prisma.paymentWebhook.update({
+        where: { id: webhook.id },
+        data: {
+          ...data,
+          processed: !data.processingError,
+          processedAt: new Date(),
+        },
+      });
+
+    const verified = verifyMercadoPagoSignature({
+      signatureHeader: signature,
+      requestId,
+      // Mercado Pago signs the query's data.id; one that did not come there is left out.
+      dataId: queryDataId,
+      secret: this.config.get<string>('mercadoPago.webhookSecret'),
+    });
+    if (!verified) {
+      this.logger.warn(
+        `Rejected Mercado Pago webhook for ${resourceId ?? 'unknown'}: signature not verified`,
+      );
+      throw new BadRequestError('Webhook signature verification failed');
+    }
+
+    if (type === 'mp-connect') {
+      if (accountId && str(rawPayload['action'])?.includes('deauthorized')) {
+        await this.mercadoPagoConnect.deauthorize(accountId);
+      }
+      await done({});
+      return {};
+    }
+    if (type !== 'payment' || !resourceId) {
+      await done({});
+      return {};
+    }
+
+    // The store's connection: the hinted payment's, else the account's.
+    let config = payment
+      ? await this.prisma.chileanPaymentConfig.findUnique({
+          where: { id: payment.chileanConfigId },
+        })
+      : null;
+    if (!config && accountId) {
+      config = await this.prisma.chileanPaymentConfig.findFirst({
+        where: { provider, merchantId: accountId },
+        orderBy: { updatedAt: 'desc' },
+      });
+    }
+    if (!config) {
+      await done({
+        processingError: 'No store connection for this notification',
+      });
+      return {};
+    }
+
+    if (!payment) {
+      const id = await this.mercadoPago.identify({
+        providerPaymentId: resourceId,
+        config: adapterConfig(config),
+      });
+      payment = id
+        ? await this.prisma.payment.findFirst({
+            where: {
+              id,
+              paymentProvider: provider,
+              chileanConfigId: config.id,
+            },
+            select: RETURN_SELECT,
+          })
+        : null;
+    }
+    if (!payment) {
+      await done({ processingError: 'Not an EKORU payment' });
+      return {};
+    }
+    if (isSettled(payment.status, provider)) {
+      await done({ paymentId: payment.id });
+      return { paymentId: payment.id };
+    }
+
+    const result = await this.mercadoPago.resolve({
+      paymentId: payment.id,
+      amount: payment.amount,
+      externalId: payment.externalId ?? '',
+      providerPaymentId: resourceId,
+      config: adapterConfig(config),
+    });
+    if (result.status === 'PROCESSING') {
+      await done({ paymentId: payment.id });
+      return { paymentId: payment.id };
+    }
+    const status = await this._settle(payment, result, provider);
+    await done({ paymentId: payment.id });
+    return { paymentId: payment.id, status };
+  }
+
+  /**
+   * Job, before the expiry sweep: asks Mercado Pago about payments still
+   * waiting past the window (the buyer never came back and the webhook never
+   * arrived), so a paid one is settled instead of expired.
+   */
+  async reconcileStale(windowMinutes: number): Promise<number> {
+    const before = new Date(Date.now() - windowMinutes * 60_000);
+    const stale = await this.prisma.payment.findMany({
+      where: {
+        paymentProvider: ChileanPaymentProvider.MERCADOPAGO,
+        createdAt: { lt: before },
+        OR: [
+          {
+            status: {
+              in: [PrismaPaymentStatus.PENDING, PrismaPaymentStatus.PROCESSING],
+            },
+          },
+          // A rejected attempt may have been followed by an approved one whose
+          // webhook was lost: ask once more as the window closes, not forever.
+          {
+            status: PrismaPaymentStatus.FAILED,
+            createdAt: { gt: new Date(before.getTime() - 30 * 60_000) },
+          },
+        ],
+      },
+      select: { ...RETURN_SELECT, chileanPaymentConfig: true },
+      take: 100,
+    });
+    let settled = 0;
+    for (const payment of stale) {
+      try {
+        const result = await this.mercadoPago.lookup({
+          paymentId: payment.id,
+          amount: payment.amount,
+          externalId: payment.externalId ?? '',
+          config: adapterConfig(payment.chileanPaymentConfig),
+        });
+        if (result.status === 'PROCESSING') continue;
+        await this._settle(payment, result, ChileanPaymentProvider.MERCADOPAGO);
+        settled++;
+      } catch (error) {
+        this.logger.warn(
+          `Could not reconcile Mercado Pago payment ${payment.id}: ${String(error)}`,
+        );
+      }
+    }
+    if (settled)
+      this.logger.log(`Reconciled ${settled} Mercado Pago payment(s)`);
+    return settled;
+  }
+
   // ─── helpers ──────────────────────────────────────────────────────────────
 
   /**
@@ -832,16 +1163,9 @@ export class PaymentsService {
     // against Transbank directly. Nothing to verify here.
     if (provider === ChileanPaymentProvider.WEBPAY) return true;
 
-    // MercadoPago's `x-signature` scheme is not implemented yet (EK-1 /
-    // SEC-BACKLOG). The provider is not enabled for real sellers, so rather
-    // than silently accepting forged events, refuse them outright: if
-    // MercadoPago is switched on, this must be implemented first.
-    if (provider === ChileanPaymentProvider.MERCADOPAGO) {
-      this.logger.warn(
-        'MercadoPago webhook rejected: signature verification is not implemented',
-      );
-      return false;
-    }
+    // Mercado Pago signs with EKORU's application secret, not a seller's, and
+    // is verified in _handleMercadoPagoWebhook; it never reaches this path.
+    if (provider === ChileanPaymentProvider.MERCADOPAGO) return false;
 
     if (!rawBody || !signature || !sellerId) return false;
 
@@ -867,6 +1191,9 @@ export class PaymentsService {
     orderId: number | null,
     rawStatus: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'EXPIRED' | 'PROCESSING',
     raw: Record<string, unknown>,
+    /** Mercado Pago's payment id, known once paid: refunds key on it. */
+    providerPaymentId?: string,
+    { keepOrderOpen = false }: { keepOrderOpen?: boolean } = {},
   ) {
     const status = this._toPaymentStatus(rawStatus);
     const isTerminal = status !== PaymentStatus.PROCESSING;
@@ -874,6 +1201,7 @@ export class PaymentsService {
       where: { id: paymentId },
       data: {
         status,
+        ...(providerPaymentId ? { externalToken: providerPaymentId } : {}),
         processedAt:
           status === PaymentStatus.COMPLETED ? new Date() : undefined,
         failureReason:
@@ -900,6 +1228,7 @@ export class PaymentsService {
     } else if (
       orderId &&
       isTerminal &&
+      !keepOrderOpen &&
       (status === PaymentStatus.FAILED ||
         status === PaymentStatus.CANCELLED ||
         status === PaymentStatus.EXPIRED)
@@ -931,7 +1260,10 @@ export class PaymentsService {
    * Webpay's normal return carries only `token_ws` (no buy order), which we
    * stored as `externalToken`, so we look up by token there. Its abort/timeout
    * returns instead carry `TBK_ORDEN_COMPRA` (our `externalId`) with no usable
-   * token. Other providers always identify the payment by `externalId`.
+   * token. Mercado Pago's return carries our `external_reference`
+   * (`ekoru-pay-<id>`) and the `preference_id` we stored as `externalId`.
+   * The adapter then checks the payment it names really carries that
+   * reference, so a tampered query cannot settle someone else's payment.
    *
    * Looking up by token first also avoids a `findFirst({ externalId: undefined })`
    * that would otherwise silently match the first Webpay row in the table.
@@ -940,18 +1272,7 @@ export class PaymentsService {
     provider: ChileanPaymentProvider,
     payload: Record<string, unknown>,
   ) {
-    const select = {
-      id: true,
-      externalId: true,
-      externalToken: true,
-      chileanConfigId: true,
-      orderId: true,
-      // Needed to activate a subscription on a completed MEMBERSHIP payment.
-      paymentType: true,
-      status: true,
-      payerId: true,
-      metadata: true,
-    } as const;
+    const select = RETURN_SELECT;
 
     if (provider === ChileanPaymentProvider.WEBPAY) {
       const tokenWs = payload['token_ws'] as string | undefined;
@@ -961,6 +1282,17 @@ export class PaymentsService {
           select,
         });
         if (byToken) return byToken;
+      }
+    }
+
+    if (provider === ChileanPaymentProvider.MERCADOPAGO) {
+      const id = paymentIdFromReference(payload['external_reference']);
+      if (id) {
+        const byReference = await this.prisma.payment.findFirst({
+          where: { id, paymentProvider: provider },
+          select,
+        });
+        if (byReference) return byReference;
       }
     }
 
@@ -995,11 +1327,8 @@ export class PaymentsService {
           (payload['notification_token'] as string | undefined)
         );
       case ChileanPaymentProvider.MERCADOPAGO:
-        return (
-          (payload['data'] as { id?: string } | undefined)?.id ??
-          (payload['preference_id'] as string | undefined) ??
-          (payload['external_reference'] as string | undefined)
-        );
+        // The preference id is what createPayment stored as externalId.
+        return str(payload['preference_id']);
     }
   }
 
@@ -1250,6 +1579,36 @@ export class PaymentsService {
   }
 }
 
+/** The Payment columns a return, a webhook or the reconcile job needs. */
+const RETURN_SELECT = {
+  id: true,
+  amount: true,
+  externalId: true,
+  externalToken: true,
+  chileanConfigId: true,
+  orderId: true,
+  // Needed to activate a subscription on a completed MEMBERSHIP payment.
+  paymentType: true,
+  status: true,
+  payerId: true,
+  metadata: true,
+} as const;
+
+/** The provider credentials an adapter acts with. */
+function adapterConfig(config: {
+  environment: 'SANDBOX' | 'PRODUCTION';
+  merchantId: string | null;
+  apiKey: string | null;
+  secretKey: string | null;
+}) {
+  return {
+    environment: config.environment,
+    merchantId: config.merchantId,
+    apiKey: config.apiKey,
+    secretKey: config.secretKey,
+  };
+}
+
 const PAYMENT_SELECT = {
   id: true,
   orderId: true,
@@ -1263,6 +1622,7 @@ const PAYMENT_SELECT = {
   description: true,
   fees: true,
   netAmount: true,
+  feePercentage: true,
   payerId: true,
   receiverId: true,
   failureReason: true,

@@ -27,7 +27,8 @@ const MAX_STRING = 300;
 const MAX_ITEMS = 20;
 const MAX_DEPTH = 4;
 const MAX_JSON = 8000;
-const SECRET_KEY = /password|token|secret/i;
+// `oauth` covers the one-time OAuth code and state of a Mercado Pago connection.
+const SECRET_KEY = /password|token|secret|oauth/i;
 
 /** Arguments trimmed for the log: long strings cut, big lists counted, secrets hidden. */
 function summarize(value: unknown, depth = 0): unknown {

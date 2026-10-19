@@ -9,6 +9,8 @@ import { ConfigService } from '@nestjs/config';
 import { Job, Queue } from 'bullmq';
 import { PAYMENT_JOBS, PAYMENT_QUEUE } from '../../payments/payment-queue.js';
 import { SettlementService } from '../../payments/settlement.service.js';
+import { PaymentsService } from '../../payments/payments.service.js';
+import { MercadoPagoConnectService } from '../../payments/mercadopago/mercadopago-connect.service.js';
 
 interface RefundJob {
   refundId: number;
@@ -34,7 +36,9 @@ interface QuotationJob {
  *   process-refund    the provider gives the money back (TRX-2)
  *   adjust-stock      stores takes sold units out, or puts them back (TRX-3)
  *   settle-quotation  services stamps a paid quotation (TRX-6)
- *   expire-stale      abandoned checkouts expire (TRX-9), on a schedule
+ *   expire-stale      abandoned checkouts expire (TRX-9), on a schedule;
+ *                     Mercado Pago is asked first, so a paid one settles
+ *   refresh-mercadopago-tokens  stores' Mercado Pago tokens renewed (daily)
  *
  * The provider charge itself is synchronous (PaymentsService.createPayment):
  * the redirect is what the buyer is waiting for. The old `initiate-payment`
@@ -49,6 +53,8 @@ export class PaymentProcessor extends WorkerHost implements OnModuleInit {
     private readonly settlement: SettlementService,
     private readonly config: ConfigService,
     @InjectQueue(PAYMENT_QUEUE) private readonly queue: Queue,
+    private readonly payments: PaymentsService,
+    private readonly mercadoPagoConnect: MercadoPagoConnectService,
   ) {
     super();
   }
@@ -69,6 +75,17 @@ export class PaymentProcessor extends WorkerHost implements OnModuleInit {
       },
     );
     this.logger.log(`Stale checkout sweep scheduled every ${everyMin} min`);
+
+    await this.queue.add(
+      PAYMENT_JOBS.mercadoPagoTokens,
+      {},
+      {
+        repeat: { every: 24 * 60 * 60_000 },
+        jobId: 'mercadopago-token-refresh',
+        removeOnComplete: true,
+        removeOnFail: 20,
+      },
+    );
   }
 
   async process(job: Job): Promise<unknown> {
@@ -85,10 +102,16 @@ export class PaymentProcessor extends WorkerHost implements OnModuleInit {
         return this.settlement.settleQuotation(
           (job as Job<QuotationJob>).data.paymentId,
         );
-      case PAYMENT_JOBS.expire:
-        return this.settlement.expireStale(
-          this.config.get<number>('payments.expireAfterMinutes', 60),
+      case PAYMENT_JOBS.expire: {
+        const window = this.config.get<number>(
+          'payments.expireAfterMinutes',
+          60,
         );
+        await this.payments.reconcileStale(window);
+        return this.settlement.expireStale(window);
+      }
+      case PAYMENT_JOBS.mercadoPagoTokens:
+        return this.mercadoPagoConnect.refreshExpiring();
       default:
         this.logger.warn(
           `Trabajo desconocido en la cola de pagos: ${job.name}`,

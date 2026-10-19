@@ -222,6 +222,12 @@ export class PaymentsResolver {
     return this.paymentsService.getSellerMonthlyRevenue({ sellerId, months });
   }
 
+  /** The providers buyers can pay with now; clients offer only these. */
+  @Query(() => [ChileanPaymentProvider], { name: 'enabledPaymentProviders' })
+  enabledPaymentProviders() {
+    return this.paymentsService.enabledProviders();
+  }
+
   // ─── Mutations ─────────────────────────────────────────────────────────────
 
   @Mutation(() => ChileanPaymentConfig)
@@ -255,11 +261,15 @@ export class PaymentsResolver {
     @Args('membershipId', { type: () => Int }) membershipId: number,
     @Args('returnUrl', { type: () => String }) returnUrl: string,
     @CurrentSeller() payerId: string,
+    // Omitted: the first enabled provider (PAYMENT_PROVIDERS), Mercado Pago today.
+    @Args('provider', { type: () => ChileanPaymentProvider, nullable: true })
+    provider?: ChileanPaymentProvider,
   ) {
     return this.paymentsService.createMembershipPayment({
       membershipId,
       payerId,
       returnUrl,
+      provider: provider ?? undefined,
     });
   }
 
@@ -273,7 +283,7 @@ export class PaymentsResolver {
     @Args('returnUrl', { type: () => String }) returnUrl: string,
     @Args('provider', {
       type: () => ChileanPaymentProvider,
-      defaultValue: ChileanPaymentProvider.WEBPAY,
+      defaultValue: ChileanPaymentProvider.MERCADOPAGO,
     })
     provider: ChileanPaymentProvider,
     @CurrentSeller() payerId?: string,
@@ -339,6 +349,11 @@ export class PaymentsResolver {
     rawBody?: string,
     @Args('signature', { type: () => String, nullable: true })
     signature?: string,
+    // Mercado Pago signs `x-request-id` and the query's `data.id` (TRX-16).
+    @Args('requestId', { type: () => String, nullable: true })
+    requestId?: string,
+    @Args('query', { type: () => GraphQLJSON, nullable: true })
+    query?: Record<string, unknown>,
   ) {
     this._assertInternal(ctx);
     const result = await this.paymentsService.handleProviderWebhook({
@@ -347,6 +362,8 @@ export class PaymentsResolver {
       rawPayload: payload,
       rawBody,
       signature,
+      requestId: requestId ?? undefined,
+      query: query ?? undefined,
     });
     return result.status ?? PaymentStatus.PROCESSING;
   }

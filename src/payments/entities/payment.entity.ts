@@ -47,6 +47,10 @@ export class Payment {
   @Field(() => Float, { nullable: true })
   netAmount?: number;
 
+  /** EKORU's commission rate when charged, as a fraction (0.05 = 5%). `fees` is that share in money. */
+  @Field(() => Float, { nullable: true })
+  feePercentage?: number;
+
   @Field(() => String)
   payerId: string;
 

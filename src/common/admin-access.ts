@@ -21,6 +21,7 @@ interface AdminRow {
   role: string;
   permissions: string[];
   isActive: boolean;
+  sellerId: string | null;
 }
 
 /**
@@ -36,7 +37,8 @@ async function loadAdmin(
     SELECT "adminType"::text     AS "adminType",
            "role"::text          AS "role",
            "permissions"::text[] AS "permissions",
-           "isActive"
+           "isActive",
+           "sellerId"
     FROM "Admin"
     WHERE "id" = ${adminId}
     LIMIT 1`;
@@ -157,6 +159,33 @@ export async function sellerScope(
     return requested;
   }
   throw new UnauthorizedError('Debe iniciar sesión');
+}
+
+/**
+ * The store a BUSINESS admin works for. With `manage`, they must also be able
+ * to change the business's settings: the owner, or anyone holding
+ * MANAGE_BUSINESS_PROFILE. Used for the store's own payout account (TRX-5),
+ * which a business sets up in the panel.
+ */
+export async function businessAdminSeller(
+  prisma: PrismaService,
+  { adminId, manage }: { adminId?: string; manage: boolean },
+): Promise<string> {
+  if (!adminId) throw new UnauthorizedError('Admin authentication required');
+  const admin = await loadAdmin(prisma, adminId);
+  if (!admin?.isActive || admin.adminType !== 'BUSINESS' || !admin.sellerId) {
+    throw new ForbiddenError('Solo una cuenta de empresa puede hacer esto');
+  }
+  if (
+    manage &&
+    admin.role !== 'BUSINESS_OWNER' &&
+    !(admin.permissions ?? []).includes('MANAGE_BUSINESS_PROFILE')
+  ) {
+    throw new ForbiddenError(
+      'Solo quien administra la empresa puede cambiar cómo recibe los pagos',
+    );
+  }
+  return admin.sellerId;
 }
 
 /** The session seller, or UNAUTHORIZED. For `my*` queries. */

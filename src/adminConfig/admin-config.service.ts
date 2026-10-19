@@ -36,7 +36,8 @@ const PAYMENT_CONFIG_SELECT = {
 
 /**
  * Admin CRUD for the transactions subgraph's small config tables. First one:
- * `TransactionFee` (one fee per seller type). Raw reads bypass no filters —
+ * `TransactionFee`, EKORU's commission rate per seller type, applied to every
+ * order and quotation payment (CommissionService). Raw reads bypass no filters —
  * these tables have no soft-delete or active flag — so they double as the
  * public reads plus admin write surface.
  */
@@ -92,8 +93,23 @@ export class AdminConfigService {
         return { outcome: 'updated', id };
       }
 
-      // `sellerTypeFee` is not unique (multiple fee tiers per type are allowed),
-      // so a row without an id always creates.
+      // One commission rate per seller type (TRX-10): a row without an id for
+      // a type that already has a rate updates it instead of adding a second
+      // one that would silently compete with it.
+      if (row.sellerTypeFee) {
+        const existing = await this.prisma.transactionFee.findFirst({
+          where: { sellerTypeFee: row.sellerTypeFee },
+          orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+          select: { id: true },
+        });
+        if (existing) {
+          await this.prisma.transactionFee.update({
+            where: { id: existing.id },
+            data,
+          });
+          return { outcome: 'updated', id: existing.id };
+        }
+      }
       requireBulkFields(row, ['sellerTypeFee', 'feePercentage', 'description']);
       const created = await this.prisma.transactionFee.create({
         data: {

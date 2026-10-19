@@ -14,6 +14,12 @@ export interface InitiatePaymentArgs {
   /** Absolute URL the provider redirects the buyer to after pay/cancel. */
   returnUrl: string;
   /**
+   * EKORU's commission on this charge, in the payment currency (TRX-10). A
+   * provider that splits at source (Mercado Pago's `marketplace_fee`) takes it
+   * there; one that cannot ignores it, and the Payment still records it.
+   */
+  platformFee?: number;
+  /**
    * Provider credentials + environment for this seller, sourced from
    * ChileanPaymentConfig. Keep this provider-specific in the adapter — the
    * service shouldn't know about apiKey/secretKey/merchantId semantics.
@@ -37,6 +43,8 @@ export interface InitiatePaymentResult {
 
 export interface ConfirmPaymentArgs {
   paymentId: number;
+  /** What the Payment row expects to have been charged. */
+  amount: number;
   externalId: string;
   externalToken: string | null;
   config: InitiatePaymentArgs['config'];
@@ -49,11 +57,18 @@ export interface ConfirmPaymentResult {
   status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'EXPIRED' | 'PROCESSING';
   /** Provider's own response, persisted on `PaymentWebhook`/`PaymentTransaction` for audit. */
   raw: Record<string, unknown>;
+  /**
+   * The provider's id for the charge, when only known once paid (Mercado
+   * Pago's payment id). Stored as Payment.externalToken: refunds key on it.
+   */
+  providerPaymentId?: string;
 }
 
 export interface RefundArgs {
   /** Internal Payment.id, for logs. */
   paymentId: number;
+  /** Internal PaymentRefund.id: makes a retried refund call idempotent. */
+  refundId?: number;
   externalId: string | null;
   /** Webpay's transaction token: what its refund call is keyed on. */
   externalToken: string | null;
@@ -114,4 +129,12 @@ export interface ProviderAdapter {
    * FAILED instead of pretending.
    */
   refund?(args: RefundArgs): Promise<RefundResult>;
+  /**
+   * Asks the provider what became of a payment the buyer never came back
+   * from, before it is expired (Mercado Pago). Optional: Webpay's form simply
+   * times out, so there is nothing to ask.
+   */
+  lookup?(
+    args: Omit<ConfirmPaymentArgs, 'rawPayload' | 'externalToken'>,
+  ): Promise<ConfirmPaymentResult>;
 }

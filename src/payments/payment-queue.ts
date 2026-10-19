@@ -7,4 +7,5 @@ export const PAYMENT_JOBS = {
   stock: 'adjust-stock',
   quotation: 'settle-quotation',
   expire: 'expire-stale',
+  mercadoPagoTokens: 'refresh-mercadopago-tokens',
 } as const;

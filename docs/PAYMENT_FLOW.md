@@ -103,7 +103,7 @@ interface ProviderAdapter {
 SANDBOX uses `IntegrationCommerceCodes.WEBPAY_PLUS` + integration API key; PRODUCTION uses the seller's `merchantId`/`secretKey`. Webpay has no webhook (`handleWebhook` is a `PROCESSING` no-op).
 
 ### MercadoPago ([`mercadopago.adapter.ts`](../src/payments/providers/mercadopago.adapter.ts))
-`initiate` creates a Preference → `EXTERNAL` redirect (`sandbox_init_point` in SANDBOX). Webhook-authoritative; the gateway passes the resolved status in `payload.__status`. Builds `notification_url` from `GATEWAY_BASE_URL`. SDK loaded via a non-literal specifier so the subgraph compiles/boots without the package installed.
+The live provider since 2026-10-19 (D1): marketplace split 1:1. Each store connects its own account with OAuth, the buyer pays the store, and EKORU's commission goes in `marketplace_fee`. `initiate` creates a Checkout Pro preference with the store's token → `EXTERNAL` redirect to `init_point`. The return and the signed webhook both read the payment back from `/v1/payments` and check its `external_reference` (`ekoru-pay-<id>`) and amount. Setup, env and the go-live checklist: [`MERCADOPAGO.md`](./MERCADOPAGO.md).
 
 ---
 
