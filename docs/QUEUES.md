@@ -55,15 +55,17 @@ sequenceDiagram
 `process(job)` dispatches on `job.name`
 ([payment.processor.ts](../src/queues/processors/payment.processor.ts)):
 
-| Job name | Payload | Produced today? | Handler effect |
-|---|---|:-:|---|
-| `process-refund` | `{ refundId, paymentId, amount, provider }` | ✅ `refundPayment()` | Marks refund `COMPLETED`, payment `REFUNDED`, writes audit row. |
-| `initiate-payment` | `{ paymentId, provider, amount, … }` | ❌ reserved | Handler exists, but `createPayment` initiates the provider **synchronously** (buyer is waiting on the redirect URL). Not currently enqueued. |
-| `process-webhook` | `{ webhookId }` | ❌ reserved | Handler exists, but returns/webhooks are reconciled synchronously in `handleProviderReturn` / `handleProviderWebhook`. Not currently enqueued. |
+| Job name | Payload | Produced by | Handler effect |
+|---|---|---|---|
+| `process-refund` | `{ refundId }` | `refundPayment()`, automatic refunds in `SettlementService` | Calls the provider's refund; only its answer moves the refund, payment and order (TRX-2). |
+| `adjust-stock` | `{ kind: 'SALE' \| 'RESTOCK', orderId, paymentId }` | a paid order, a full refund | Stores takes the units out or puts them back (TRX-3). |
+| `settle-quotation` | `{ paymentId }` | a paid quotation | Services stamps the quotation paid, or the payment is refunded (TRX-6). |
+| `expire-stale` | `{}` | repeatable, every `PAYMENT_EXPIRE_SWEEP_MINUTES` | Asks Mercado Pago about stale payments first (`reconcileStale`), then expires what is left and cancels unpaid orders (TRX-9). |
+| `refresh-mercadopago-tokens` | `{}` | repeatable, daily | Renews stores' Mercado Pago tokens expiring within 30 days; pauses refused ones (TRX-5). |
 
-So in the current codebase the queue carries **refund jobs only**. The other two
-handlers are scaffolding for moving those flows async later — they cost nothing
-until something calls `queue.add()` with those names.
+The old `initiate-payment` and `process-webhook` handlers are gone (TRX-14):
+the provider charge is synchronous, and returns and webhooks are settled in
+`PaymentsService` directly.
 
 **Retries / backoff** — set per-job by the producer. Refunds use:
 
@@ -282,3 +284,24 @@ tweak. No network/volume needed.
 | Managed Redis connects then drops | TLS required — set `REDIS_TLS=true` + the §4 code change. |
 | Jobs enqueue but never process | Worker not running — confirm `QueuesModule` is imported in [`app.module.ts`](../src/app.module.ts). |
 | Jobs vanish under load | Redis eviction policy isn't `noeviction` (§3). |
+
+---
+
+## 8. The long-lived containers and how they are watched (INF-4, INF-5)
+
+| Container | Network | What uses it | Watched by |
+|---|---|---|---|
+| `ekoru-transactions-redis` (`-staging`) | `ekoru-network` (`ekoru-staging-network`) | db 0: the payments queue above. db 1: the gateway's rate-limit counters (`THROTTLER_REDIS_*`, INF-11) | Alloy's Redis exporter (`redis_up`, memory); `ekoru_payments_queue_depth` from the transactions `/metrics` |
+| `ekoru-users-redis` (`-staging`) | same | ekoru-users' notifications queue | Alloy's Redis exporter; `ekoru_notifications_queue_depth` from the users `/metrics` |
+| `ekoru-typesense` (`-staging`) | same | ekoru-search | Alloy's blackbox probe of `/health` (`probe_success{job="typesense"}`) |
+
+All of them run with `restart: always` and are started once from their own
+compose file (`redis.<env>.yml`, `typesense.<env>.yml`); app deploys never touch
+them. The alerts on them (`RedisDown`, `TypesenseDown`, `PaymentQueueBacklog`,
+`PaymentJobsFailed`, `NotificationQueueBacklog`) are in
+[`monitoring/alerts/ekoru.rules.yml`](../../monitoring/alerts/ekoru.rules.yml);
+setup in [`monitoring/README.md`](../../monitoring/README.md).
+
+The gateway's counters use their own database number and key prefix
+(`gateway:throttle:`), expire on their own, and fall back to memory if Redis
+does not answer, so this Redis being down never takes the API down.

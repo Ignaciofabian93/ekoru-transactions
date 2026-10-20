@@ -79,6 +79,23 @@ pipeline {
       }
     }
 
+    // Typecheck, lint without --fix, and the dependency audit (INF-6). Any
+    // error, or a high or critical advisory not in audit-allowlist.json, stops
+    // the pipeline before anything is built or deployed.
+    stage('Checks') {
+      agent {
+        docker {
+          image 'node:22-alpine'
+          args '-u root'
+        }
+      }
+      steps {
+        sh 'npx tsc --noEmit -p tsconfig.json'
+        sh 'npx eslint "{src,apps,libs,test}/**/*.ts"'
+        sh 'node scripts/audit-gate.cjs'
+      }
+    }
+
     stage('Build') {
       agent {
         docker {
@@ -118,8 +135,9 @@ pipeline {
           docker compose -f compose.staging.yml up -d --force-recreate
           docker image prune -f
           # --no-cache builds never reuse the build cache, but it still grows on
-          # every deploy until the disk fills (INF-15). Keep the last day only.
-          docker builder prune -f --filter until=24h
+          # every deploy until the disk fills (INF-15). Keep the last day only;
+          # -a, because without it prune only removes dangling records.
+          docker builder prune -af --filter until=24h
         '''
         sshagent(['github-deploy-key-transactions']) {
           sh '''
@@ -155,8 +173,9 @@ pipeline {
           docker compose -f compose.prod.yml up -d --force-recreate
           docker image prune -f
           # --no-cache builds never reuse the build cache, but it still grows on
-          # every deploy until the disk fills (INF-15). Keep the last day only.
-          docker builder prune -f --filter until=24h
+          # every deploy until the disk fills (INF-15). Keep the last day only;
+          # -a, because without it prune only removes dangling records.
+          docker builder prune -af --filter until=24h
         '''
         sshagent(['github-deploy-key-transactions']) {
           sh '''

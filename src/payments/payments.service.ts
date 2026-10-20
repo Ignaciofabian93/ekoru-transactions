@@ -34,6 +34,7 @@ import type { ConfirmPaymentResult } from './providers/index.js';
 import { SettlementService } from './settlement.service.js';
 import { CommissionService } from './commission.service.js';
 import { PaymentSecrets } from './payment-secrets.js';
+import { recordPaymentOutcome } from './payments.metrics.js';
 import { MercadoPagoConnectService } from './mercadopago/mercadopago-connect.service.js';
 import { verifyMercadoPagoSignature } from './mercadopago/mercadopago-signature.js';
 import { paymentIdFromReference } from './providers/mercadopago.adapter.js';
@@ -1237,8 +1238,9 @@ export class PaymentsService {
   ) {
     const status = this._toPaymentStatus(rawStatus);
     const isTerminal = status !== PaymentStatus.PROCESSING;
-    await this.prisma.payment.update({
+    const updated = await this.prisma.payment.update({
       where: { id: paymentId },
+      select: { paymentProvider: true, paymentType: true },
       data: {
         status,
         ...(providerPaymentId ? { externalToken: providerPaymentId } : {}),
@@ -1253,6 +1255,13 @@ export class PaymentsService {
         updatedAt: new Date(),
       },
     });
+    if (isTerminal) {
+      recordPaymentOutcome({
+        provider: String(updated?.paymentProvider ?? 'UNKNOWN'),
+        type: String(updated?.paymentType ?? 'UNKNOWN'),
+        status,
+      });
+    }
     await this.prisma.paymentTransaction.create({
       data: {
         paymentId,

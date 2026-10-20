@@ -12,6 +12,7 @@ import { SettlementService } from '../../payments/settlement.service.js';
 import { PaymentsService } from '../../payments/payments.service.js';
 import { MercadoPagoConnectService } from '../../payments/mercadopago/mercadopago-connect.service.js';
 import { PaymentSecrets } from '../../payments/payment-secrets.js';
+import { registerPaymentQueueGauge } from '../../payments/payments.metrics.js';
 
 interface RefundJob {
   refundId: number;
@@ -62,6 +63,8 @@ export class PaymentProcessor extends WorkerHost implements OnModuleInit {
   }
 
   async onModuleInit(): Promise<void> {
+    // Queue backlog for the alerts, read at scrape time (INF-5).
+    registerPaymentQueueGauge(this.queue);
     // Credentials stored before PAYMENT_SECRETS_KEY existed get sealed (TRX-21).
     await this.secrets
       .sealExistingRows()

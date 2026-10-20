@@ -1,0 +1,8 @@
+[
+  {
+    "id": "GHSA-7mx3-vvmw-hjmv",
+    "package": "@graphql-tools/utils",
+    "reason": "Prototype pollution in mergeDeep, used while building the schema from our own type definitions, never on request data. The fix needs @nestjs/graphql 14 and @nestjs/apollo 14, a major upgrade tracked as INF-21.",
+    "until": "2026-12-31"
+  }
+]
