@@ -500,6 +500,118 @@ export class SettlementService {
         processedAt: new Date(),
       },
     });
+    await this.afterRefundCompleted({
+      payment,
+      amount: refund.amount,
+      raw: result.raw,
+    });
+  }
+
+  /**
+   * A refund made outside EKORU (TRX-22): the store refunded from its own
+   * Mercado Pago account. `refundedTotal` is what the provider says has been
+   * given back on the payment in all; whatever EKORU has not accounted for yet
+   * becomes a COMPLETED refund, with the same effects as one made from the
+   * panel. Refunds EKORU itself started and has not finished count as
+   * accounted for, so its own in-flight refund is never recorded twice.
+   */
+  async recordExternalRefund({
+    paymentId,
+    refundedTotal,
+    raw,
+  }: {
+    paymentId: number;
+    refundedTotal: number;
+    raw: Record<string, unknown>;
+  }): Promise<number> {
+    const recorded = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Payment" WHERE "id" = ${paymentId} FOR UPDATE`;
+      const payment = await tx.payment.findUnique({
+        where: { id: paymentId },
+        select: { id: true, amount: true, status: true, orderId: true },
+      });
+      if (!payment || !REFUNDABLE.includes(payment.status)) return null;
+      const { _sum } = await tx.paymentRefund.aggregate({
+        where: { paymentId, status: { in: OPEN_OR_DONE_REFUNDS } },
+        _sum: { amount: true },
+      });
+      const amount =
+        Math.min(refundedTotal, payment.amount) - (_sum.amount ?? 0);
+      if (amount <= EPSILON) return null;
+      await tx.paymentRefund.create({
+        data: {
+          paymentId,
+          amount,
+          reason: 'Reembolso hecho por la tienda en Mercado Pago',
+          status: DbRefundStatus.COMPLETED,
+          processedAt: new Date(),
+        },
+      });
+      return { payment, amount };
+    });
+    if (!recorded) return 0;
+    this.logger.warn(
+      `Payment ${paymentId}: ${recorded.amount} refunded outside EKORU, recorded`,
+    );
+    await this.afterRefundCompleted({
+      payment: recorded.payment,
+      amount: recorded.amount,
+      raw: { ...raw, source: 'provider' },
+    });
+    return recorded.amount;
+  }
+
+  /**
+   * The buyer disputed the charge with their bank or Mercado Pago (TRX-22).
+   * Nothing moves on EKORU's side: the provider holds or takes the money from
+   * the store. It is recorded once on the payment, and logged as an error so
+   * support sees it.
+   */
+  async recordDispute({
+    paymentId,
+    kind,
+    raw,
+  }: {
+    paymentId: number;
+    kind: 'CHARGEBACK' | 'MEDIATION';
+    raw: Record<string, unknown>;
+  }): Promise<void> {
+    const seen = await this.prisma.paymentTransaction.findFirst({
+      where: { paymentId, action: kind },
+      select: { id: true },
+    });
+    if (seen) return;
+    await this.prisma.paymentTransaction.create({
+      data: {
+        paymentId,
+        action: kind,
+        status: kind,
+        description:
+          kind === 'CHARGEBACK'
+            ? 'Contracargo del comprador en Mercado Pago'
+            : 'Reclamo del comprador abierto en Mercado Pago',
+        metadata: raw as Prisma.InputJsonValue,
+      },
+    });
+    this.logger.error(
+      `Payment ${paymentId}: ${kind === 'CHARGEBACK' ? 'charged back' : 'in mediation'} at Mercado Pago — support should follow up`,
+    );
+  }
+
+  /**
+   * What follows a completed refund, wherever it was made: the payment becomes
+   * REFUNDED or PARTIALLY_REFUNDED, the order is told, and a full refund puts
+   * the units back in stock.
+   */
+  private async afterRefundCompleted({
+    payment,
+    amount,
+    raw,
+  }: {
+    payment: { id: number; amount: number; orderId: number | null };
+    amount: number;
+    raw: Record<string, unknown>;
+  }): Promise<void> {
     const { _sum } = await this.prisma.paymentRefund.aggregate({
       where: { paymentId: payment.id, status: DbRefundStatus.COMPLETED },
       _sum: { amount: true },
@@ -518,10 +630,10 @@ export class SettlementService {
       data: {
         paymentId: payment.id,
         action: 'REFUND',
-        amount: refund.amount,
+        amount,
         status: DbRefundStatus.COMPLETED,
         description: full ? 'Reembolso total' : 'Reembolso parcial',
-        metadata: result.raw as Prisma.InputJsonValue,
+        metadata: raw as Prisma.InputJsonValue,
       },
     });
 
@@ -529,7 +641,7 @@ export class SettlementService {
       await this.orders.markRefunded({
         orderId: payment.orderId,
         full,
-        amount: refund.amount,
+        amount,
       });
       if (full) {
         await this.queue.add(

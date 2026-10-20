@@ -35,7 +35,11 @@ function make(settings: Record<string, unknown> = {}) {
   };
   const adapter = { confirm: jest.fn(), initiate: jest.fn() };
   const providers = { for: jest.fn(() => adapter) };
-  const settlement = { onCompleted: jest.fn() };
+  const settlement = {
+    onCompleted: jest.fn(),
+    recordExternalRefund: jest.fn(),
+    recordDispute: jest.fn(),
+  };
   const orders = { markCanceled: jest.fn() };
   const services = { getQuotationCharge: jest.fn() };
   const users = { activateMembership: jest.fn() };
@@ -51,6 +55,12 @@ function make(settings: Record<string, unknown> = {}) {
     resolve: jest.fn(),
     identify: jest.fn(),
     lookup: jest.fn(),
+    inspect: jest.fn().mockResolvedValue({
+      paymentId: 77,
+      status: 'approved',
+      refunded: 0,
+      raw: {},
+    }),
   };
   const connect = { deauthorize: jest.fn() };
   const values: Record<string, unknown> = {
@@ -591,8 +601,8 @@ describe('PaymentsService', () => {
       expect(settlement.onCompleted).toHaveBeenCalledWith(77);
     });
 
-    it('never touches a completed payment again', async () => {
-      const { service, prisma, mercadoPago } = make();
+    it('never re-settles a completed payment', async () => {
+      const { service, prisma, mercadoPago, settlement } = make();
       prisma.payment.findFirst.mockResolvedValue({
         ...payment,
         status: 'COMPLETED',
@@ -602,6 +612,72 @@ describe('PaymentsService', () => {
       await deliver(service);
 
       expect(mercadoPago.resolve).not.toHaveBeenCalled();
+      expect(settlement.onCompleted).not.toHaveBeenCalled();
+      expect(settlement.recordExternalRefund).not.toHaveBeenCalled();
+    });
+
+    it('records a refund the store made in Mercado Pago (TRX-22)', async () => {
+      const { service, prisma, mercadoPago, settlement } = make();
+      prisma.payment.findFirst.mockResolvedValue({
+        ...payment,
+        status: 'COMPLETED',
+      });
+      prisma.chileanPaymentConfig.findUnique.mockResolvedValue(storeConfig);
+      mercadoPago.inspect.mockResolvedValue({
+        paymentId: 77,
+        status: 'refunded',
+        refunded: 20000,
+        raw: { id: 555 },
+      });
+
+      await deliver(service);
+
+      expect(settlement.recordExternalRefund).toHaveBeenCalledWith({
+        paymentId: 77,
+        refundedTotal: 20000,
+        raw: { id: 555 },
+      });
+    });
+
+    it('logs a chargeback for support (TRX-22)', async () => {
+      const { service, prisma, mercadoPago, settlement } = make();
+      prisma.payment.findFirst.mockResolvedValue({
+        ...payment,
+        status: 'COMPLETED',
+      });
+      prisma.chileanPaymentConfig.findUnique.mockResolvedValue(storeConfig);
+      mercadoPago.inspect.mockResolvedValue({
+        paymentId: 77,
+        status: 'charged_back',
+        refunded: 0,
+        raw: {},
+      });
+
+      await deliver(service);
+
+      expect(settlement.recordDispute).toHaveBeenCalledWith(
+        expect.objectContaining({ paymentId: 77, kind: 'CHARGEBACK' }),
+      );
+      expect(settlement.recordExternalRefund).not.toHaveBeenCalled();
+    });
+
+    it("ignores a charge that carries another payment's reference", async () => {
+      const { service, prisma, mercadoPago, settlement } = make();
+      prisma.payment.findFirst.mockResolvedValue({
+        ...payment,
+        status: 'COMPLETED',
+      });
+      prisma.chileanPaymentConfig.findUnique.mockResolvedValue(storeConfig);
+      mercadoPago.inspect.mockResolvedValue({
+        paymentId: 12,
+        status: 'refunded',
+        refunded: 20000,
+        raw: {},
+      });
+
+      await deliver(service);
+
+      expect(settlement.recordExternalRefund).not.toHaveBeenCalled();
     });
 
     it('pauses the store connection when it unlinks EKORU', async () => {

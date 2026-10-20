@@ -136,6 +136,13 @@ row in **Configuración de pagos**:
   refunds it because the order is gone.
 - **Refund.** `POST /v1/payments/{id}/refunds` with the store's token,
   idempotent per refund row.
+- **A refund the store makes in its own Mercado Pago account.** The payment's
+  next webhook reads the charge back. Whatever was refunded beyond what EKORU
+  accounted for is recorded as a completed refund: the order becomes refunded,
+  and a full refund restocks (TRX-22).
+- **Chargebacks and claims.** A `charged_back` or `in_mediation` charge is
+  recorded once on the payment (`CHARGEBACK` / `MEDIATION`) and logged as an
+  error for support. The money is Mercado Pago's and the store's to settle.
 - **Tokens.** They last 180 days. A daily job renews those expiring within 30
   days. If Mercado Pago refuses a renewal, the connection pauses and the panel
   asks the store to reconnect.

@@ -185,6 +185,40 @@ export class MercadoPagoAdapter implements ProviderAdapter {
     return paymentIdFromReference(payment.external_reference);
   }
 
+  /**
+   * A paid charge as Mercado Pago sees it now, for what can happen after the
+   * payment (TRX-22): refunds made from the store's account, disputes.
+   */
+  async inspect({
+    providerPaymentId,
+    config,
+  }: {
+    providerPaymentId: string;
+    config: InitiatePaymentArgs['config'];
+  }): Promise<{
+    paymentId: number | null;
+    status: string;
+    refunded: number;
+    raw: Record<string, unknown>;
+  }> {
+    const payment = await this.api.getPayment({
+      accessToken: this.token(config),
+      paymentId: providerPaymentId,
+    });
+    return {
+      paymentId: paymentIdFromReference(payment.external_reference),
+      status: payment.status,
+      refunded: payment.transaction_amount_refunded ?? 0,
+      raw: {
+        id: payment.id,
+        status: payment.status,
+        status_detail: payment.status_detail ?? null,
+        transaction_amount: payment.transaction_amount,
+        transaction_amount_refunded: payment.transaction_amount_refunded ?? 0,
+      },
+    };
+  }
+
   /** Refunds (all or part of) a charge; Mercado Pago returns EKORU's fee share proportionally. */
   async refund(args: RefundArgs): Promise<RefundResult> {
     if (!args.externalToken) {

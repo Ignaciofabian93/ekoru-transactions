@@ -594,4 +594,115 @@ describe('SettlementService', () => {
       expect(result).toEqual({ payments: 2, orders: 2 });
     });
   });
+  describe('recordExternalRefund (TRX-22)', () => {
+    const paid = { id: 7, amount: 20000, status: 'COMPLETED', orderId: 42 };
+
+    it('records what the store refunded in Mercado Pago and restocks a full refund', async () => {
+      const { service, prisma, tx, orders, queue } = make();
+      tx.payment.findUnique.mockResolvedValue(paid);
+      tx.paymentRefund.aggregate.mockResolvedValue({ _sum: { amount: 0 } });
+      prisma.paymentRefund.aggregate.mockResolvedValue({
+        _sum: { amount: 20000 },
+      });
+
+      const recorded = await service.recordExternalRefund({
+        paymentId: 7,
+        refundedTotal: 20000,
+        raw: { id: 555 },
+      });
+
+      expect(recorded).toBe(20000);
+      expect(tx.$queryRaw).toHaveBeenCalled(); // payment row locked
+      expect(tx.paymentRefund.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          paymentId: 7,
+          amount: 20000,
+          status: 'COMPLETED',
+        }),
+      });
+      expect(prisma.payment.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'REFUNDED' }),
+        }),
+      );
+      expect(orders.markRefunded).toHaveBeenCalledWith({
+        orderId: 42,
+        full: true,
+        amount: 20000,
+      });
+      expect(jobNames(queue)).toContain(PAYMENT_JOBS.stock);
+    });
+
+    it('records only the part EKORU has not accounted for', async () => {
+      const { service, tx, orders } = make();
+      tx.payment.findUnique.mockResolvedValue(paid);
+      // A 5000 refund already made from the panel, a further 3000 in Mercado Pago.
+      tx.paymentRefund.aggregate.mockResolvedValue({ _sum: { amount: 5000 } });
+
+      const recorded = await service.recordExternalRefund({
+        paymentId: 7,
+        refundedTotal: 8000,
+        raw: {},
+      });
+
+      expect(recorded).toBe(3000);
+      expect(orders.markRefunded).toHaveBeenCalledWith(
+        expect.objectContaining({ amount: 3000, full: false }),
+      );
+    });
+
+    it("never records EKORU's own refund twice while it is in flight", async () => {
+      const { service, tx, orders } = make();
+      tx.payment.findUnique.mockResolvedValue(paid);
+      // The panel's 5000 refund is still PROCESSING; Mercado Pago already shows it.
+      tx.paymentRefund.aggregate.mockResolvedValue({ _sum: { amount: 5000 } });
+
+      const recorded = await service.recordExternalRefund({
+        paymentId: 7,
+        refundedTotal: 5000,
+        raw: {},
+      });
+
+      expect(recorded).toBe(0);
+      expect(tx.paymentRefund.create).not.toHaveBeenCalled();
+      expect(orders.markRefunded).not.toHaveBeenCalled();
+    });
+
+    it('ignores a payment that is already fully refunded', async () => {
+      const { service, tx } = make();
+      tx.payment.findUnique.mockResolvedValue({ ...paid, status: 'REFUNDED' });
+
+      await expect(
+        service.recordExternalRefund({
+          paymentId: 7,
+          refundedTotal: 20000,
+          raw: {},
+        }),
+      ).resolves.toBe(0);
+      expect(tx.paymentRefund.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('recordDispute (TRX-22)', () => {
+    it('records a chargeback once', async () => {
+      const { service, prisma } = make();
+
+      await service.recordDispute({
+        paymentId: 7,
+        kind: 'CHARGEBACK',
+        raw: {},
+      });
+      prisma.paymentTransaction.findFirst.mockResolvedValue({ id: 1 });
+      await service.recordDispute({
+        paymentId: 7,
+        kind: 'CHARGEBACK',
+        raw: {},
+      });
+
+      expect(prisma.paymentTransaction.create).toHaveBeenCalledTimes(1);
+      expect(prisma.paymentTransaction.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ paymentId: 7, action: 'CHARGEBACK' }),
+      });
+    });
+  });
 });

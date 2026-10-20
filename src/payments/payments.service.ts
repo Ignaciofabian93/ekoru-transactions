@@ -1053,6 +1053,17 @@ export class PaymentsService {
       return {};
     }
     if (isSettled(payment.status, provider)) {
+      // A paid charge can still change at Mercado Pago (TRX-22).
+      if (
+        payment.status === PrismaPaymentStatus.COMPLETED ||
+        payment.status === PrismaPaymentStatus.PARTIALLY_REFUNDED
+      ) {
+        await this._followPaidCharge({
+          paymentId: payment.id,
+          providerPaymentId: resourceId,
+          config,
+        });
+      }
       await done({ paymentId: payment.id });
       return { paymentId: payment.id };
     }
@@ -1071,6 +1082,46 @@ export class PaymentsService {
     const status = await this._settle(payment, result, provider);
     await done({ paymentId: payment.id });
     return { paymentId: payment.id, status };
+  }
+
+  /**
+   * What happened to a paid Mercado Pago charge since (TRX-22): a refund the
+   * store made from its own account is recorded like one made in the panel,
+   * and a chargeback or an open claim is logged for support.
+   */
+  private async _followPaidCharge({
+    paymentId,
+    providerPaymentId,
+    config,
+  }: {
+    paymentId: number;
+    providerPaymentId: string;
+    config: {
+      environment: 'SANDBOX' | 'PRODUCTION';
+      merchantId: string | null;
+      apiKey: string | null;
+      secretKey: string | null;
+    };
+  }): Promise<void> {
+    const charge = await this.mercadoPago.inspect({
+      providerPaymentId,
+      config: this.secrets.credentials(config),
+    });
+    if (charge.paymentId !== paymentId) return;
+    if (charge.status === 'charged_back' || charge.status === 'in_mediation') {
+      await this.settlement.recordDispute({
+        paymentId,
+        kind: charge.status === 'charged_back' ? 'CHARGEBACK' : 'MEDIATION',
+        raw: charge.raw,
+      });
+    }
+    if (charge.refunded > 0) {
+      await this.settlement.recordExternalRefund({
+        paymentId,
+        refundedTotal: charge.refunded,
+        raw: charge.raw,
+      });
+    }
   }
 
   /**
