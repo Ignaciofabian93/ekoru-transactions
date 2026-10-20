@@ -27,7 +27,7 @@
   },
   "dependencies": {
     "@apollo/server": "^5.5.1",
-    "@apollo/subgraph": "^2.12.2",
+    "@apollo/subgraph": "~2.14.4",
     "@as-integrations/express5": "^1.1.2",
     "@nestjs/apollo": "^13.2.1",
     "@nestjs/bullmq": "^11.0.2",
