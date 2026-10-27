@@ -4,5 +4,23 @@
     "package": "@graphql-tools/utils",
     "reason": "Prototype pollution in mergeDeep, used while building the schema from our own type definitions, never on request data. The fix needs @nestjs/graphql 14 and @nestjs/apollo 14, a major upgrade tracked as INF-21.",
     "until": "2026-12-31"
+  },
+  {
+    "id": "GHSA-c4qx-w738-7hr3",
+    "package": "@graphql-tools/utils",
+    "reason": "Prototype pollution in mergeIncrementalResult, which merges @defer/@stream results inside graphql-tools executors. We run none (no @graphql-tools/executor, delegate or stitch), so it is never called. @nestjs/graphql 13 pins utils 12.0.0; the fix comes with @nestjs/graphql 14 (INF-21).",
+    "until": "2026-12-31"
+  },
+  {
+    "id": "GHSA-27r3-jxmh-p828",
+    "package": "body-parser",
+    "reason": "Denial of service through trailing bytes after a compressed request body. Fixed in 2.4.0, released 2026-10-22, too new to install before 2026-11-05. Then run npm update body-parser and remove this entry (INF-22).",
+    "until": "2026-11-07"
+  },
+  {
+    "id": "GHSA-q7qp-rjg7-q26m",
+    "package": "multer",
+    "reason": "Denial of service while an asynchronous fileFilter is pending at request teardown. Our only fileFilters (gateway image uploads) are synchronous. Fixed in 2.5.0, released 2026-10-22; @nestjs/platform-express 11 still pins 2.4.0. After 2026-11-05, override multer to 2.5.0 and remove this entry (INF-22).",
+    "until": "2026-11-07"
   }
 ]
