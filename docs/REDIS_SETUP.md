@@ -13,10 +13,10 @@ and [`redis.prod.yml`](../redis.prod.yml). You just start one, once.
 
 ## What Redis needs from you
 
-Exactly one thing: a password, `REDIS_PASSWORD`. It's already set in
-`.env.staging` / `.env.prod` and is read by **both** the app and the Redis
-container from that same file — so they always agree. You don't have to touch it
-unless you want to rotate it.
+Exactly one thing: a password, `REDIS_PASSWORD`. It lives in Infisical, folder
+`/ekoru-transactions`, in `staging` and `prod`. Every app deploy exports it from
+there, and the Redis container gets the same value when you create it (below) —
+so they agree. You don't have to touch it unless you want to rotate it.
 
 To generate a fresh one (optional):
 
@@ -24,48 +24,67 @@ To generate a fresh one (optional):
 openssl rand -hex 32
 ```
 
-Paste the value into `REDIS_PASSWORD` in the env file **before** starting Redis.
-If you rotate it later, you must recreate both the Redis container and the app.
+Put the value in `REDIS_PASSWORD` in Infisical **before** starting Redis. To
+rotate it later: change it in Infisical, redeploy the app in Jenkins, then
+straight away repeat the export and `up -d` below. Compose sees the new password
+and recreates Redis; queued jobs survive in its volume. Until Redis is
+recreated, the app gets `WRONGPASS`.
 
 ---
 
 ## Staging: one-time setup
 
 Redis is deliberately **not** in the Jenkinsfile — it's a long-lived container
-that must survive app redeploys, so you bring it up by hand once. On the server:
+that must survive app redeploys, so you bring it up by hand once. Redis reads
+`.env.staging` only while `up` creates it, so the file is exported from
+Infisical just for that and deleted afterwards; a copy left lying around would
+go stale the first time a value changes in Infisical. On the server, as root:
 
 ```bash
 # 0. The shared network must exist (created once for the whole staging stack):
 docker network inspect ekoru-staging-network >/dev/null 2>&1 \
   || docker network create ekoru-staging-network
 
-# 1. Put the secret env file in place (carries REDIS_PASSWORD):
-#    /opt/ekoru/secrets/ekoru-transactions/.env.staging   (chmod 600)
-cd /path/to/ekoru-transactions
-cp /opt/ekoru/secrets/ekoru-transactions/.env.staging .env.staging
+# 1. Log in to Infisical: the lines of infisical/README.md section 5.2 up to
+#    `export INFISICAL_TOKEN` (they set IMAGE, RUN and the token).
 
-# 2. Start Redis (long-lived; you only ever run this once per server):
-docker compose -f redis.staging.yml up -d
+# 2. Export the env (carries REDIS_PASSWORD), start Redis, delete the file:
+cd /path/to/ekoru-transactions        # the folder with redis.staging.yml
+( umask 077; $RUN -e INFISICAL_TOKEN -e INFISICAL_PROJECT_ID $IMAGE \
+    sm export --env=staging --path=/ekoru-transactions --format=dotenv --expand=false --silent \
+    > .env.staging )
+if grep -q '^REDIS_PASSWORD=.' .env.staging; then docker compose -f redis.staging.yml up -d
+else echo "The export has no REDIS_PASSWORD. Redis not started."; fi
+shred -u .env.staging
+unset INFISICAL_TOKEN INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET
 
-# 3. Verify it's healthy and auth works:
+# 3. Verify it's healthy and auth works (the password comes from the container):
 docker ps --filter name=ekoru-transactions-redis-staging
 docker exec ekoru-transactions-redis-staging \
-  redis-cli -a "$(grep '^REDIS_PASSWORD' .env.staging | cut -d'"' -f2)" ping
+  sh -c 'redis-cli -a "$REDIS_PASSWORD" --no-auth-warning ping'
 #   → PONG
 ```
 
 That's it. The app finds Redis at `REDIS_HOST=ekoru-transactions-redis-staging`
-on the network (already set in `.env.staging`). Redeploying the app later never
+on the network (already set in Infisical). Redeploying the app later never
 touches this container, so queued jobs survive.
 
 ## Production
 
-Identical, using the prod files and network:
+Identical, with `--env=prod`, `.env.prod`, `redis.prod.yml` and the prod
+network. Log in first, as in step 1 above:
 
 ```bash
 docker network inspect ekoru-network >/dev/null 2>&1 || docker network create ekoru-network
-cp /opt/ekoru/secrets/ekoru-transactions/.env.prod .env.prod
-docker compose -f redis.prod.yml up -d      # container: ekoru-transactions-redis
+cd /path/to/ekoru-transactions
+( umask 077; $RUN -e INFISICAL_TOKEN -e INFISICAL_PROJECT_ID $IMAGE \
+    sm export --env=prod --path=/ekoru-transactions --format=dotenv --expand=false --silent \
+    > .env.prod )
+if grep -q '^REDIS_PASSWORD=.' .env.prod; then docker compose -f redis.prod.yml up -d   # container: ekoru-transactions-redis
+else echo "The export has no REDIS_PASSWORD. Redis not started."; fi
+shred -u .env.prod
+unset INFISICAL_TOKEN INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET
+docker exec ekoru-transactions-redis sh -c 'redis-cli -a "$REDIS_PASSWORD" --no-auth-warning ping'   # → PONG
 ```
 
 ---
@@ -81,8 +100,9 @@ docker logs ekoru-transactions-staging --tail 50
 
 - `ECONNREFUSED` → Redis isn't up, or `REDIS_HOST` doesn't match the Redis
   container name, or they're on different networks.
-- `WRONGPASS` / `NOAUTH` → `REDIS_PASSWORD` differs between the app env and the
-  Redis container (they must come from the same `.env` value).
+- `WRONGPASS` / `NOAUTH` → `REDIS_PASSWORD` differs between the app and the
+  Redis container. Redis still has the value from when it was created: recreate
+  it with a fresh export (above).
 
 ---
 

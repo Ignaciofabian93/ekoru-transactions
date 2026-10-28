@@ -124,10 +124,10 @@ Set per environment:
 | [`.env.prod`](../.env.prod) | `ekoru-transactions-redis` | `ekoru-network` |
 
 > `REDIS_PASSWORD` is a **secret** — the committed env files hold a placeholder.
-> The real value lives only in the server-side secret files the Jenkins deploy
-> copies over (`/opt/ekoru/secrets/ekoru-transactions/.env.{staging,prod}`, §6).
-> The same env file feeds both the app and its Redis container, so the password
-> is defined once.
+> The real value lives only in Infisical (`/ekoru-transactions`, in `staging` and
+> `prod`), which every Jenkins deploy exports (§6). Redis gets the same value
+> when it is created ([`REDIS_SETUP.md`](./REDIS_SETUP.md)), so the password is
+> defined once.
 
 Only `host` / `port` / `password` are wired. If you later use a **managed
 provider that requires TLS** (Upstash, Azure Cache for Redis, etc.), add a `tls`
@@ -216,23 +216,18 @@ Both containers sit on the same external network (`ekoru-network` /
 embedded DNS resolves the Redis container by its name, which is exactly what
 `REDIS_HOST` is set to in [`.env.prod`](../.env.prod) /
 [`.env.staging`](../.env.staging). Redis is **not** host-published (`-p`
-omitted) — reachable only from inside the network. Both files read
-`REDIS_PASSWORD` from the same env file, so the password is defined once.
+omitted) — reachable only from inside the network. Both get
+`REDIS_PASSWORD` from the same Infisical value, so the password is defined once.
 
 ### First-time host setup (once per environment)
 
-```sh
-# 1. secret env-files on the deploy host (real REDIS_PASSWORD + full runtime env:
-#    DATABASE_URL, INTERNAL_SERVICE_SECRET, MARKETPLACE_URL, STORES_URL,
-#    GATEWAY_BASE_URL). chmod 600. The networks already exist.
-mkdir -p /opt/ekoru/secrets/ekoru-transactions
-#   …place .env.prod and .env.staging here…
-
-# 2. bring Redis up ONCE (from a checkout with the env-file present). It has
-#    restart: always, so it survives reboots and stays up across app deploys.
-docker compose -f redis.prod.yml up -d        # prod
-docker compose -f redis.staging.yml up -d     # staging
-```
+1. The env lives in Infisical, folder `/ekoru-transactions` in `staging` and
+   `prod`: the real `REDIS_PASSWORD` plus the full runtime env (`DATABASE_URL`,
+   `INTERNAL_SERVICE_SECRET`, `MARKETPLACE_URL`, `STORES_URL`,
+   `GATEWAY_BASE_URL`). The networks already exist.
+2. Bring Redis up **once**, from an env file exported from Infisical and deleted
+   right after: [`REDIS_SETUP.md`](./REDIS_SETUP.md). It has `restart: always`,
+   so it survives reboots and stays up across app deploys.
 
 Also add a `github-deploy-key-transactions` SSH credential in Jenkins (matches
 the `github-deploy-key-<service>` convention) for the version-tag push.
@@ -241,18 +236,20 @@ the `github-deploy-key-<service>` convention) for the version-tag push.
 
 [`Jenkinsfile`](../Jenkinsfile) matches the sibling subgraphs
 (stores/marketplace/users): build → test → **Deploy Staging** → manual *Confirm
-E2E OK* gate → **Deploy Production**. Each deploy stage copies the real secret
-env-file over the placeholder, then brings up **only the app**:
+E2E OK* gate → **Deploy Production**. Each deploy stage writes the env file from
+Infisical over the placeholder (`exportEnvFromInfisical`, at the top of the
+Jenkinsfile), then brings up **only the app**:
 
 ```sh
-cp /opt/ekoru/secrets/ekoru-transactions/.env.prod ${WORKSPACE}/.env.prod
+# exportEnvFromInfisical('prod', '.env.prod', 'DATABASE_URL') writes ${WORKSPACE}/.env.prod
 docker compose -f compose.prod.yml build --no-cache
 docker compose -f compose.prod.yml up -d --force-recreate   # app only; Redis untouched
 ```
 
 Redis is deliberately **not** in the Jenkins flow — it's long-lived infra. If you
-ever need to bounce or upgrade it, do it deliberately with `redis.<env>.yml`
-(the AOF volume persists jobs across the restart).
+ever need to bounce or upgrade it, do it deliberately with `redis.<env>.yml`,
+exporting the env file first as in [`REDIS_SETUP.md`](./REDIS_SETUP.md) (the AOF
+volume persists jobs across the restart). A plain `docker restart` needs no file.
 
 ### Managed Redis instead (§5c)
 
