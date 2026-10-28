@@ -40,9 +40,11 @@ There are two applications, because Checkout Pro has no test credentials:
 Do the steps below for each one, in
 [Tus integraciones](https://www.mercadopago.cl/developers/panel/app).
 
-1. **Create the application.** Choose Pagos online, then "No" to an
-   e-commerce platform, then the product Checkout Pro and the Marketplace
-   model.
+1. **Create the application.** Choose Checkout Pro, then under Otros datos
+   the Tipo de API **API de Preferences** (the code calls
+   `/checkout/preferences`, not the Orders API). Since 2026-10 the form no
+   longer asks for an integration model: the split comes from the stores'
+   OAuth connection and the `marketplace_fee` on each preference.
 2. **Redirect URLs** (Detalles de aplicación → Editar). Add each one exactly,
    with no language prefix:
    - production application: `https://admin.ekoru.cl/payment-setup` (panel)
