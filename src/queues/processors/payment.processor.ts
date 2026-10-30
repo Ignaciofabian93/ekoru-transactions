@@ -4,7 +4,11 @@ import {
   OnWorkerEvent,
   InjectQueue,
 } from '@nestjs/bullmq';
-import { Logger, OnModuleInit } from '@nestjs/common';
+import {
+  BeforeApplicationShutdown,
+  Logger,
+  OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Job, Queue } from 'bullmq';
 import { PAYMENT_JOBS, PAYMENT_QUEUE } from '../../payments/payment-queue.js';
@@ -48,7 +52,10 @@ interface QuotationJob {
  * enqueued them, so they are gone (TRX-14).
  */
 @Processor(PAYMENT_QUEUE)
-export class PaymentProcessor extends WorkerHost implements OnModuleInit {
+export class PaymentProcessor
+  extends WorkerHost
+  implements OnModuleInit, BeforeApplicationShutdown
+{
   private readonly logger = new Logger(PaymentProcessor.name);
 
   constructor(
@@ -98,6 +105,14 @@ export class PaymentProcessor extends WorkerHost implements OnModuleInit {
         removeOnFail: 20,
       },
     );
+  }
+
+  /**
+   * On shutdown, waits for the job in progress before anything else closes:
+   * Prisma and Redis close later, in onApplicationShutdown.
+   */
+  async beforeApplicationShutdown(): Promise<void> {
+    await this.worker.close();
   }
 
   async process(job: Job): Promise<unknown> {

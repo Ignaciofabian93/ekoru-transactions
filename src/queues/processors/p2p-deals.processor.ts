@@ -1,5 +1,9 @@
 import { Processor, WorkerHost, InjectQueue } from '@nestjs/bullmq';
-import { Logger, OnModuleInit } from '@nestjs/common';
+import {
+  BeforeApplicationShutdown,
+  Logger,
+  OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Job, Queue } from 'bullmq';
 import { MarketplaceDealsService } from '../../marketplace-deals/marketplace-deals.service.js';
@@ -15,7 +19,10 @@ const SWEEP_JOB = 'sweep-deals';
  * don't stack duplicates.
  */
 @Processor(P2P_DEALS_QUEUE)
-export class P2pDealsProcessor extends WorkerHost implements OnModuleInit {
+export class P2pDealsProcessor
+  extends WorkerHost
+  implements OnModuleInit, BeforeApplicationShutdown
+{
   private readonly logger = new Logger(P2pDealsProcessor.name);
 
   constructor(
@@ -39,6 +46,14 @@ export class P2pDealsProcessor extends WorkerHost implements OnModuleInit {
       },
     );
     this.logger.log(`P2P deal sweep scheduled every ${everyMin} min`);
+  }
+
+  /**
+   * On shutdown, waits for the job in progress before anything else closes:
+   * Prisma and Redis close later, in onApplicationShutdown.
+   */
+  async beforeApplicationShutdown(): Promise<void> {
+    await this.worker.close();
   }
 
   async process(job: Job): Promise<unknown> {
