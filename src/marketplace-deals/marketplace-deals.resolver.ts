@@ -18,6 +18,7 @@ import {
 import { BadRequestError, NotFoundError } from '../common/exceptions/index.js';
 import { P2PDeal, P2PDealSettings, P2PReputation } from './entities/index.js';
 import { Seller, ProductRef } from '../common/entities/index.js';
+import { P2PStatus } from '../graphql/enums/index.js';
 import { CurrentSeller, CurrentAdmin } from '../common/decorators/index.js';
 
 @Resolver(() => P2PDeal)
@@ -195,5 +196,30 @@ export class MarketplaceDealsResolver {
   @ResolveField(() => ProductRef, { nullable: true })
   offeredProduct(@Parent() deal: P2PDeal): ProductRef | null {
     return deal.offeredProductId != null ? { id: deal.offeredProductId } : null;
+  }
+
+  /**
+   * The eco-points this deal credited to the viewer, read from the ledger rows
+   * the award writes (`deal:<id>`), so the app shows what was paid rather
+   * than what the rules promise. Null before the deal completes and for anyone
+   * outside it; 0 while the award has not landed.
+   */
+  @ResolveField(() => Int, { nullable: true })
+  async myPoints(
+    @Parent() deal: P2PDeal,
+    @CurrentSeller() viewerId?: string,
+  ): Promise<number | null> {
+    if (
+      deal.status !== P2PStatus.COMPLETED ||
+      !viewerId ||
+      (viewerId !== deal.buyerId && viewerId !== deal.sellerId)
+    ) {
+      return null;
+    }
+    const { _sum } = await this.prisma.transaction.aggregate({
+      where: { sellerId: viewerId, notes: `deal:${deal.id}` },
+      _sum: { pointsCollected: true },
+    });
+    return _sum.pointsCollected ?? 0;
   }
 }
