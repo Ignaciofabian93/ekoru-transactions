@@ -590,6 +590,13 @@ describe('SettlementService', () => {
         },
         data: expect.objectContaining({ status: 'EXPIRED' }),
       });
+      // An order paid again from the history lives as long as that attempt.
+      const [{ where }] = prisma.order.findMany.mock.calls[0];
+      expect(where).toEqual({
+        status: 'PENDING_PAYMENT',
+        createdAt: { lt: expect.any(Date) },
+        payment: { none: { createdAt: { gte: where.createdAt.lt } } },
+      });
       expect(orders.markCanceled).toHaveBeenCalledTimes(2);
       expect(result).toEqual({ payments: 2, orders: 2 });
     });

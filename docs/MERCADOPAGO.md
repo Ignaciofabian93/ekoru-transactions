@@ -156,20 +156,34 @@ row in **Configuración de pagos**:
 
 1. In the production application's Cuentas de prueba, create three test
    accounts, all in Chile:
-   - an **Integrador**, which owns the staging application (§2);
+   - an **Integrador** (type "Marketplace" in Mercado Pago's form), which owns
+     the staging application (§2);
    - a **Vendedor**, which plays a store;
    - a **Comprador**, which plays a buyer.
 2. Sign in to the panel as a BUSINESS admin of a test store, open **Cobros** and
-   connect while signed in to Mercado Pago as the test Vendedor. Use a private
-   window, so you are not signed in as EKORU. The connection uses the test
-   accounts' production credentials, so `test_token` stays off.
-3. Buy as the test buyer with Mercado Pago's test cards.
+   connect while signed in to Mercado Pago as the test Vendedor. First sign out
+   of every Mercado Pago account in that browser: private windows share one
+   Mercado Pago session, and authorizing as EKORU or as the Integrador that owns
+   the app fails after "Autorizar" with "La aplicación no está preparada para
+   conectarse a Mercado Pago". The connection uses the test accounts'
+   production credentials, so `test_token` stays off and Cobros shows the mode
+   as Producción.
+3. Buy as the test buyer with a card from the staging app's Tarjetas de
+   prueba. Don't pay with the test buyer's balance ("Dinero disponible"): it
+   asks for an identity check a test account can't pass. On a phone, the
+   checkout may open in the Mercado Pago app; if you leave it, pay the order
+   again from Mis pedidos.
 4. Check the results:
    - the order is PAID;
    - the payment shows the commission;
    - the PaymentWebhook row is `processed`;
    - in the test seller's Mercado Pago activity, the fee is split off.
-5. Refund from the panel and check that both shares go back.
+5. Refund from the test seller's own Mercado Pago account (Actividad → the
+   operation → Devolver dinero) and check that both shares go back and that
+   the webhook records the refund. A refund from the panel can't be tested
+   here: Mercado Pago refuses API refunds made with test accounts' credentials
+   (401 "Unauthorized use of live credentials"), so the panel refund is first
+   tried with a real low-value payment in production.
 
 ## 8. Webpay as a future option
 

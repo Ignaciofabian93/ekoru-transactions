@@ -692,6 +692,9 @@ export class SettlementService {
    * window become EXPIRED, and orders still waiting for payment are CANCELED
    * (which tells both parties). Webpay's own form times out after about ten
    * minutes, so a window of an hour never cuts off a buyer who is paying.
+   * An order counts from its latest payment attempt: a buyer who pays again
+   * from the order history gets the whole window that attempt's Mercado Pago
+   * preference stays open for.
    */
   async expireStale(windowMinutes: number): Promise<{
     payments: number;
@@ -712,6 +715,7 @@ export class SettlementService {
       where: {
         status: DbOrderStatus.PENDING_PAYMENT,
         createdAt: { lt: before },
+        payment: { none: { createdAt: { gte: before } } },
       },
       select: { id: true },
       take: 500,
