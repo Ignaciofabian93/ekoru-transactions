@@ -100,8 +100,13 @@ Platform admins set it in the panel under **Comisiones** (`transaction-fees`).
 
 ## 5. Memberships (payments to EKORU)
 
-EKORU's platform seller (`EKORU_PLATFORM_SELLER_ID`) needs its own MERCADOPAGO
-row in **Configuración de pagos**:
+EKORU's platform seller (`EKORU_PLATFORM_SELLER_ID`, `ekoru-platform-account`)
+needs its own MERCADOPAGO row in **Configuración de pagos**. The row points at a
+Seller, so that Seller must exist first: it is a receive-only account nobody
+logs in to, created by step 1 of
+[`scripts/seed-ekoru-platform.sql`](../scripts/seed-ekoru-platform.sql). Its
+Webpay step isn't needed while Webpay is off. Don't make it a real business
+sign-up. Fill the row in like this:
 
 - `merchantId`: EKORU's Mercado Pago user id.
 - `secretKey`: EKORU's production access token (`APP_USR-…`), from Producción →
