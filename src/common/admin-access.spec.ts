@@ -3,6 +3,7 @@ import {
   assertBusinessSeller,
   assertPartyOrAdmin,
   businessAdminSeller,
+  businessAdminWith,
   requireSeller,
   sellerScope,
 } from './admin-access.js';
@@ -249,6 +250,55 @@ describe('businessAdminSeller (TRX-5)', () => {
         }),
       ),
     ).toBe('UNAUTHORIZED');
+  });
+});
+
+describe("a store's panel team on its orders (USR-15)", () => {
+  const member = (row: Partial<Row> & { sellerId?: string | null } = {}) =>
+    prismaWith({
+      adminType: 'BUSINESS',
+      role: 'BUSINESS_SUPPORT',
+      permissions: ['MANAGE_BUSINESS_ORDERS'],
+      sellerId: 'store-1',
+      ...row,
+    } as Partial<Row>);
+
+  it('names the store for the owner and an orders member, nobody else', async () => {
+    const as = (prisma: PrismaService) =>
+      businessAdminWith(prisma, 'a1', 'MANAGE_BUSINESS_ORDERS');
+    await expect(as(member())).resolves.toBe('store-1');
+    await expect(
+      as(member({ role: 'BUSINESS_OWNER', permissions: [] })),
+    ).resolves.toBe('store-1');
+    await expect(as(member({ permissions: [] }))).resolves.toBeNull();
+    await expect(as(member({ isActive: false }))).resolves.toBeNull();
+    await expect(as(prismaWith({ role: 'SUPER_ADMIN' }))).resolves.toBeNull();
+  });
+
+  it("lists the store's own orders, never another store's", async () => {
+    const scope = (prisma: PrismaService, requested?: string) =>
+      sellerScope(prisma, {
+        adminId: 'a1',
+        requested,
+        permission: 'MANAGE_ORDERS',
+        businessPermission: 'MANAGE_BUSINESS_ORDERS',
+      });
+    await expect(scope(member())).resolves.toBe('store-1');
+    expect(await codeOf(scope(member(), 'store-2'))).toBe('FORBIDDEN');
+    // Without the permission it falls to the platform rule, which refuses.
+    expect(await codeOf(scope(member({ permissions: [] })))).toBe('FORBIDDEN');
+  });
+
+  it('reads an order the store is a party to', async () => {
+    const read = (parties: string[]) =>
+      assertPartyOrAdmin(member(), {
+        adminId: 'a1',
+        parties,
+        permission: 'MANAGE_ORDERS',
+        businessPermission: 'MANAGE_BUSINESS_ORDERS',
+      });
+    expect(await codeOf(read(['buyer-1', 'store-1']))).toBe('OK');
+    expect(await codeOf(read(['buyer-1', 'store-2']))).toBe('FORBIDDEN');
   });
 });
 

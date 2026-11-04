@@ -7,7 +7,7 @@ import {
   NotFoundError,
   UnauthorizedError,
 } from '../common/exceptions/index.js';
-import { assertAdminCan } from '../common/admin-access.js';
+import { assertAdminCan, businessAdminWith } from '../common/admin-access.js';
 import { assertShippingMove } from './shipping-rules.js';
 import {
   calculatePrismaParams,
@@ -422,9 +422,10 @@ export class OrdersService {
   }
 
   /**
-   * The order's seller moves its shipping forward; anyone else needs to be a
-   * platform admin with MANAGE_ORDERS (TRX-1). Before, anyone at all, signed
-   * out included, could mark any order shipped or delivered.
+   * The order's seller moves its shipping forward, on the web or through its
+   * panel team (MANAGE_BUSINESS_ORDERS); anyone else needs to be a platform
+   * admin with MANAGE_ORDERS (TRX-1). Before, anyone at all, signed out
+   * included, could mark any order shipped or delivered.
    */
   async updateShipping({
     input,
@@ -455,7 +456,15 @@ export class OrdersService {
           'Solo el vendedor de la orden puede actualizar el envío',
         );
       }
-      await assertAdminCan(this.prisma, adminId, 'MANAGE_ORDERS');
+      // The store's own panel team, or EKORU.
+      const store = await businessAdminWith(
+        this.prisma,
+        adminId,
+        'MANAGE_BUSINESS_ORDERS',
+      );
+      if (store !== order.sellerId) {
+        await assertAdminCan(this.prisma, adminId, 'MANAGE_ORDERS');
+      }
     }
     assertShippingMove({
       orderStatus: String(order.status),

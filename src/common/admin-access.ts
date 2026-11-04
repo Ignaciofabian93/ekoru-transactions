@@ -16,6 +16,9 @@ export type AdminPermissionName =
 
 type Permissions = AdminPermissionName | readonly AdminPermissionName[];
 
+/** The business permissions this subgraph checks; BUSINESS_OWNER holds them all. */
+export type BusinessPermissionName = 'MANAGE_BUSINESS_ORDERS';
+
 interface AdminRow {
   adminType: string;
   role: string;
@@ -88,6 +91,27 @@ export async function assertAdminCan(
   return adminId;
 }
 
+/**
+ * The store a BUSINESS admin works for, when they may act on it with
+ * `permission` (the owner always may). Null for anyone else, so the caller
+ * falls back to the platform rules. A business's panel team (USR-15).
+ */
+export async function businessAdminWith(
+  prisma: PrismaService,
+  adminId: string | undefined,
+  permission: BusinessPermissionName,
+): Promise<string | null> {
+  if (!adminId) return null;
+  const admin = await loadAdmin(prisma, adminId);
+  if (!admin?.isActive || admin.adminType !== 'BUSINESS' || !admin.sellerId) {
+    return null;
+  }
+  const holds =
+    admin.role === 'BUSINESS_OWNER' ||
+    (admin.permissions ?? []).includes(permission);
+  return holds ? admin.sellerId : null;
+}
+
 /** Whether the caller is a platform admin with any of `permission`, without throwing. */
 export async function isAdminWith(
   prisma: PrismaService,
@@ -114,15 +138,22 @@ export async function assertPartyOrAdmin(
     adminId,
     parties,
     permission,
+    businessPermission,
   }: {
     sellerId?: string;
     adminId?: string;
     parties: (string | null | undefined)[];
     permission: Permissions;
+    /** Lets a party's own business admins read it too. */
+    businessPermission?: BusinessPermissionName;
   },
 ): Promise<void> {
   if (!sellerId && !adminId) throw new UnauthorizedError('Debe iniciar sesión');
   if (sellerId && parties.includes(sellerId)) return;
+  if (businessPermission) {
+    const store = await businessAdminWith(prisma, adminId, businessPermission);
+    if (store && parties.includes(store)) return;
+  }
   if (await isAdminWith(prisma, adminId, permission)) return;
   throw new ForbiddenError('No tienes acceso a este registro');
 }
@@ -140,11 +171,14 @@ export async function sellerScope(
     adminId,
     requested,
     permission,
+    businessPermission,
   }: {
     sellerId?: string;
     adminId?: string;
     requested?: string | null;
     permission: Permissions;
+    /** Lets a business admin list their own store's records. */
+    businessPermission?: BusinessPermissionName;
   },
 ): Promise<string> {
   if (sellerId) {
@@ -152,6 +186,15 @@ export async function sellerScope(
       throw new ForbiddenError('Solo puedes ver tus propios registros');
     }
     return sellerId;
+  }
+  if (businessPermission) {
+    const store = await businessAdminWith(prisma, adminId, businessPermission);
+    if (store) {
+      if (requested && requested !== store) {
+        throw new ForbiddenError('Solo puedes ver tus propios registros');
+      }
+      return store;
+    }
   }
   if (adminId) {
     await assertAdminCan(prisma, adminId, permission);

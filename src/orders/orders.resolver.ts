@@ -28,7 +28,10 @@ export class OrdersResolver {
     private readonly prisma: PrismaService,
   ) {}
 
-  /** The order's buyer or seller, or a platform admin who oversees orders. */
+  /**
+   * The order's buyer or seller, the seller's business admins who handle
+   * orders, or a platform admin who oversees orders.
+   */
   @Query(() => Order, { name: 'getOrder', nullable: true })
   async getOrder(
     @Args('id', { type: () => ID }) id: string,
@@ -41,13 +44,15 @@ export class OrdersResolver {
       adminId,
       parties: [order.buyerId, order.sellerId],
       permission: ['MANAGE_ORDERS', 'VIEW_TRANSACTIONS'],
+      businessPermission: 'MANAGE_BUSINESS_ORDERS',
     });
     return order;
   }
 
   /**
    * Orders a seller received. A seller always gets their own (`sellerId` may
-   * be left out); a platform admin who oversees orders names the seller.
+   * be left out), and so does a business admin who handles the store's orders
+   * in the panel; a platform admin who oversees orders names the seller.
    */
   @Query(() => OrderConnection, { name: 'getOrdersBySeller' })
   async getOrdersBySeller(
@@ -67,6 +72,7 @@ export class OrdersResolver {
       adminId,
       requested,
       permission: ['MANAGE_ORDERS', 'VIEW_TRANSACTIONS'],
+      businessPermission: 'MANAGE_BUSINESS_ORDERS',
     });
     return this.ordersService.getOrdersBySeller({
       sellerId,

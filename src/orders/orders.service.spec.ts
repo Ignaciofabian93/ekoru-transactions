@@ -77,6 +77,27 @@ describe('OrdersService', () => {
       expect(prisma.shippingStatus.update).not.toHaveBeenCalled();
     });
 
+    it("lets the store's panel team ship its own orders only (USR-15)", async () => {
+      const member = {
+        adminType: 'BUSINESS',
+        role: 'BUSINESS_SUPPORT',
+        permissions: ['MANAGE_BUSINESS_ORDERS'],
+        isActive: true,
+        sellerId: 'seller',
+      };
+      const own = make(paidOrder, member);
+      expect(
+        await codeOf(own.service.updateShipping(ship(undefined, 'a1'))),
+      ).toBe('OK');
+      expect(own.prisma.shippingStatus.update).toHaveBeenCalled();
+
+      const other = make(paidOrder, { ...member, sellerId: 'another' });
+      expect(
+        await codeOf(other.service.updateShipping(ship(undefined, 'a1'))),
+      ).toBe('FORBIDDEN');
+      expect(other.prisma.shippingStatus.update).not.toHaveBeenCalled();
+    });
+
     it('refuses shipping an order that was never paid', async () => {
       const { service, prisma } = make({
         ...paidOrder,
