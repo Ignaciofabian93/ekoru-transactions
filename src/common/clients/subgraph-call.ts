@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from '../fetch-with-timeout.js';
 import { Logger } from '@nestjs/common';
 import { InternalServerError } from '../exceptions/index.js';
 
@@ -41,7 +42,7 @@ export async function callSubgraph<T>({
 
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await fetchWithTimeout(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

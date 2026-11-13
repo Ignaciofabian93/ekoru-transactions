@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from '../../common/fetch-with-timeout.js';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHmac, timingSafeEqual } from 'node:crypto';
@@ -59,7 +60,7 @@ export class KhipuAdapter implements ProviderAdapter {
 
     let res: Response;
     try {
-      res = await fetch(`${this.baseUrl}/payments`, {
+      res = await fetchWithTimeout(`${this.baseUrl}/payments`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

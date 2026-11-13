@@ -856,6 +856,15 @@ export class PaymentsService {
     /** Mercado Pago: the notification URL's query (`data.id`, `type`, our `ekoru_payment` hint). */
     query?: Record<string, unknown>;
   }): Promise<{ paymentId?: number; status?: PaymentStatus }> {
+    // A provider that is switched off sends nothing, so nothing is read or
+    // saved for it (TRX-25). Khipu's route stays public while Khipu is off.
+    if (!this.enabledProviders().includes(provider)) {
+      this.logger.warn(
+        `Ignored a ${provider} webhook: the provider is switched off`,
+      );
+      throw new BadRequestError(`${provider} is not enabled`);
+    }
+
     if (provider === ChileanPaymentProvider.MERCADOPAGO) {
       return this._handleMercadoPagoWebhook({
         eventType,
@@ -886,8 +895,16 @@ export class PaymentsService {
       signature,
     });
 
-    // Record the attempt either way — an unverified webhook is exactly the
-    // thing you want a trail of — but never let it change payment state.
+    // An unsigned call leaves a log line and no row (TRX-25). The route is
+    // public, and each row kept the whole body, so recording every attempt
+    // let anyone fill the database disk.
+    if (!verified) {
+      this.logger.warn(
+        `Rejected ${provider} webhook for externalId ${externalId ?? 'unknown'}: signature not verified`,
+      );
+      throw new BadRequestError('Webhook signature verification failed');
+    }
+
     await this.prisma.paymentWebhook.create({
       data: {
         paymentId: payment?.id,
@@ -898,13 +915,6 @@ export class PaymentsService {
         processed: false,
       },
     });
-
-    if (!verified) {
-      this.logger.warn(
-        `Rejected ${provider} webhook for externalId ${externalId ?? 'unknown'}: signature not verified`,
-      );
-      throw new BadRequestError('Webhook signature verification failed');
-    }
 
     const adapter = this.providers.for(provider);
     const result = await adapter.handleWebhook(rawPayload);
@@ -931,7 +941,7 @@ export class PaymentsService {
   /**
    * A Mercado Pago webhook (TRX-16). It only names a resource, so:
    *   1. the `x-signature` must verify with EKORU's application secret, or
-   *      nothing happens (the attempt is still recorded);
+   *      nothing happens: no lookup and no row, only a log line (TRX-25);
    *   2. the store's token is found from our `ekoru_payment` hint, or from
    *      the account id Mercado Pago sends (`user_id`);
    *   3. the payment is read back from Mercado Pago, and its reference must
@@ -960,6 +970,23 @@ export class PaymentsService {
     const hint = Number(str(query['ekoru_payment']));
     const accountId = str(rawPayload['user_id']);
 
+    // The signature comes first, before anything is read or saved (TRX-25).
+    // The route is public: a row per unsigned call, with its whole body, let
+    // anyone fill the database disk.
+    const verified = verifyMercadoPagoSignature({
+      signatureHeader: signature,
+      requestId,
+      // Mercado Pago signs the query's data.id; one that did not come there is left out.
+      dataId: queryDataId,
+      secret: this.config.get<string>('mercadoPago.webhookSecret'),
+    });
+    if (!verified) {
+      this.logger.warn(
+        `Rejected Mercado Pago webhook for ${resourceId ?? 'unknown'}: signature not verified`,
+      );
+      throw new BadRequestError('Webhook signature verification failed');
+    }
+
     let payment = Number.isInteger(hint)
       ? await this.prisma.payment.findFirst({
           where: { id: hint, paymentProvider: provider },
@@ -987,20 +1014,6 @@ export class PaymentsService {
           processedAt: new Date(),
         },
       });
-
-    const verified = verifyMercadoPagoSignature({
-      signatureHeader: signature,
-      requestId,
-      // Mercado Pago signs the query's data.id; one that did not come there is left out.
-      dataId: queryDataId,
-      secret: this.config.get<string>('mercadoPago.webhookSecret'),
-    });
-    if (!verified) {
-      this.logger.warn(
-        `Rejected Mercado Pago webhook for ${resourceId ?? 'unknown'}: signature not verified`,
-      );
-      throw new BadRequestError('Webhook signature verification failed');
-    }
 
     if (type === 'mp-connect') {
       if (accountId && str(rawPayload['action'])?.includes('deauthorized')) {

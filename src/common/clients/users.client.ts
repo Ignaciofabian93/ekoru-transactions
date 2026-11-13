@@ -1,3 +1,4 @@
+import { fetchWithTimeout } from '../fetch-with-timeout.js';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InternalServerError } from '../exceptions/index.js';
@@ -322,7 +323,7 @@ export class UsersClient {
 
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await fetchWithTimeout(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

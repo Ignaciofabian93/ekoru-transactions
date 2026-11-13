@@ -475,7 +475,7 @@ describe('PaymentsService', () => {
         query,
       });
 
-    it('records and refuses a notification whose signature does not verify', async () => {
+    it('refuses a notification whose signature does not verify, and saves nothing (TRX-25)', async () => {
       const { service, prisma, mercadoPago, settlement } = make();
       prisma.payment.findFirst.mockResolvedValue(payment);
 
@@ -483,17 +483,91 @@ describe('PaymentsService', () => {
         deliver(service, mpSignature('999', 'req-1')),
       ).rejects.toBeInstanceOf(BadRequestError);
 
-      expect(prisma.paymentWebhook.create).toHaveBeenCalled();
+      // No row and no lookup: the route is public, and a row per call let
+      // anyone fill the database.
+      expect(prisma.paymentWebhook.create).not.toHaveBeenCalled();
+      expect(prisma.payment.findFirst).not.toHaveBeenCalled();
       expect(mercadoPago.resolve).not.toHaveBeenCalled();
       expect(settlement.onCompleted).not.toHaveBeenCalled();
     });
 
+    it('refuses a notification with no signature at all, and saves nothing (TRX-25)', async () => {
+      const { service, prisma } = make();
+
+      await expect(
+        service.handleProviderWebhook({
+          provider: ChileanPaymentProvider.MERCADOPAGO,
+          eventType: 'payment',
+          rawPayload: { type: 'payment', data: { id: '1' } },
+          query: {},
+        }),
+      ).rejects.toBeInstanceOf(BadRequestError);
+
+      expect(prisma.paymentWebhook.create).not.toHaveBeenCalled();
+    });
+
     it('refuses every notification while the secret is not configured', async () => {
-      const { service, mercadoPago } = make({
+      const { service, prisma, mercadoPago } = make({
         'mercadoPago.webhookSecret': undefined,
       });
       await expect(deliver(service)).rejects.toBeInstanceOf(BadRequestError);
+      expect(prisma.paymentWebhook.create).not.toHaveBeenCalled();
       expect(mercadoPago.resolve).not.toHaveBeenCalled();
+    });
+
+    it('records a signed notification before working on it', async () => {
+      const { service, prisma } = make();
+      prisma.payment.findFirst.mockResolvedValue(payment);
+      prisma.chileanPaymentConfig.findUnique.mockResolvedValue(null);
+
+      await deliver(service);
+
+      expect(prisma.paymentWebhook.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            provider: 'MERCADOPAGO',
+            externalId: '555',
+            processed: false,
+          }),
+        }),
+      );
+    });
+
+    it('ignores a provider that is switched off, before reading or saving anything (TRX-25)', async () => {
+      const { service, prisma, adapter } = make();
+
+      await expect(
+        service.handleProviderWebhook({
+          provider: ChileanPaymentProvider.KHIPU,
+          eventType: 'notify',
+          rawPayload: { payment_id: 'abc', padding: 'x'.repeat(10_000) },
+          rawBody: '{}',
+          signature: 't=1,s=abc',
+        }),
+      ).rejects.toThrow('KHIPU is not enabled');
+
+      expect(prisma.payment.findFirst).not.toHaveBeenCalled();
+      expect(prisma.paymentWebhook.create).not.toHaveBeenCalled();
+      expect(adapter.confirm).not.toHaveBeenCalled();
+    });
+
+    it("saves nothing for another provider's call that is not signed (TRX-25)", async () => {
+      const { service, prisma } = make({
+        'payments.enabledProviders': ['MERCADOPAGO', 'KHIPU'],
+      });
+      prisma.payment.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.handleProviderWebhook({
+          provider: ChileanPaymentProvider.KHIPU,
+          eventType: 'notify',
+          rawPayload: { payment_id: 'abc' },
+          rawBody: '{"payment_id":"abc"}',
+          signature: 't=1,s=forged',
+        }),
+      ).rejects.toThrow('Webhook signature verification failed');
+
+      expect(prisma.paymentWebhook.create).not.toHaveBeenCalled();
     });
 
     it("reads the payment back with the store's token and settles it", async () => {

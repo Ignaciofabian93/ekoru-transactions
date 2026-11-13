@@ -14,6 +14,10 @@ export class PrismaService
   constructor() {
     const adapter = new PrismaPg({
       connectionString: process.env.DATABASE_URL,
+      // Bounded waits (INF-24). The defaults wait for ever: for a free
+      // connection when all 10 are busy, and for a statement that never ends.
+      connectionTimeoutMillis: 15_000,
+      statement_timeout: 30_000,
     });
     super({ adapter });
   }
