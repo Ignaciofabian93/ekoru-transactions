@@ -40,11 +40,13 @@ There are two applications, because Checkout Pro has no test credentials:
 Do the steps below for each one, in
 [Tus integraciones](https://www.mercadopago.cl/developers/panel/app).
 
-1. **Create the application.** Choose Checkout Pro, then under Otros datos
-   the Tipo de API **API de Preferences** (the code calls
-   `/checkout/preferences`, not the Orders API). Since 2026-10 the form no
-   longer asks for an integration model: the split comes from the stores'
-   OAuth connection and the `marketplace_fee` on each preference.
+1. **Create the application.** Choose Checkout Pro. Both applications were
+   created with the Tipo de API **API de Preferences**; checkouts move to the
+   Orders API with `MERCADOPAGO_CHECKOUT_API=orders` (TRX-24, §3). The form
+   flags Preferences as "será descontinuada pronto", so a new application
+   should pick **API de Orders**. Since 2026-10 the form no longer asks for an
+   integration model: the split comes from the stores' OAuth connection and
+   the `marketplace_fee` on each checkout.
 2. **Redirect URLs** (Detalles de aplicación → Editar). Add each one exactly,
    with no language prefix:
    - production application: `https://admin.ekoru.cl/payment-setup` (panel)
@@ -55,7 +57,11 @@ Do the steps below for each one, in
 4. **Webhooks** (Webhooks → Configurar notificaciones):
    - Production URL: `https://<gateway>/payments/webhook/mercadopago`
    - Test URL: the staging gateway's URL with the same path.
-   - Topics: **Pagos** (`payment`) and **Vinculación de aplicaciones** (`mp-connect`).
+   - Topics: **Order (Mercado Pago)** (`order`), **Pagos** (`payment`) and
+     **Vinculación de aplicaciones** (`mp-connect`). Orders notify only this
+     URL; a preference also names its own (`notification_url`). Keep Pagos
+     while payments made through preferences can still be refunded or
+     disputed.
    - Save, then reveal the secret key; it goes in `MERCADOPAGO_WEBHOOK_SECRET`.
 5. **Credentials:** the application's `client_id` and `client_secret`.
 
@@ -73,6 +79,7 @@ Do the steps below for each one, in
 | `MERCADOPAGO_ENVIRONMENT` | `SANDBOX` | `PRODUCTION` |
 | `MERCADOPAGO_USE_PKCE` | optional, default `true` | optional, default `true` |
 | `MERCADOPAGO_TEST_TOKEN` | leave unset (`false`) | leave unset |
+| `MERCADOPAGO_CHECKOUT_API` | `orders` | `orders` once staging passes (unset = `preferences`) |
 
 `PAYMENT_SECRETS_KEY` seals the stores' tokens and Webpay keys at rest
 (TRX-21). Production refuses to store a credential without it. Losing it makes
@@ -84,6 +91,11 @@ are sealed on the next boot.
 on each preference. Without `MERCADOPAGO_WEBHOOK_SECRET` every webhook is
 refused. Payments still settle through the buyer's return and the reconcile job
 (§6), but slower.
+
+`MERCADOPAGO_CHECKOUT_API` only picks the API for new checkouts. A payment is
+always read and refunded through the API it was created with (an `ORD…`
+`externalId` is an order, anything else a preference), so the key can be
+switched either way at any time.
 
 ## 4. Commission
 
@@ -126,30 +138,48 @@ sign-up. Fill the row in like this:
     that same person can finish, within 15 minutes.
 - **Checkout.** `createOrder` refuses a seller without an active connection
   (TRX-4), and `Seller.canReceivePayments` tells the web to hide buy buttons.
-  The preference uses `binary_mode`, so a charge is approved or rejected at
-  once. It expires 5 minutes before the expiry sweep gives up on the payment.
-- **The buyer comes back.** The return URL names the Mercado Pago payment. It
-  is read back from the API, and its reference and amount must match ours.
+  - Orders API: `POST /v1/orders` with `type: online`, `processing_mode:
+    manual` (the only value Checkout Pro takes) and `capture_mode: automatic`
+    (approved or rejected at once). Amounts and `marketplace_fee` are decimal
+    strings. The order id (`ORD…`) is stored as `externalId` and the buyer goes
+    to its `checkout_url`.
+  - Preferences API: the preference uses `binary_mode`, and its id is the
+    `externalId`.
+  - Either one expires 5 minutes before the expiry sweep gives up on the
+    payment.
+- **The buyer comes back.** The return carries our `external_reference`; an
+  Orders checkout also adds `ekoru_payment` to the return URL. An order is read
+  back by its stored id; for a preference, the payment the return names is read
+  from `/v1/payments`. The reference and amount must match ours.
 - **Webhook.** `x-signature` must verify, or nothing changes and a 500 makes
-  Mercado Pago retry. The store's token is found from the `ekoru_payment` hint
-  on the notification URL, or else from the account's `user_id`. The payment is
-  then read back from the API.
+  Mercado Pago retry.
+  - `order`: the payment is the one whose `externalId` is that order, and the
+    order is read back with its store's token.
+  - `payment`: the store's token is found from the `ekoru_payment` hint on the
+    notification URL, or else from the account's `user_id`, and the payment
+    from the charge's reference. A payment that turns out to be an order is
+    read as an order.
 - **The buyer never returns and the webhook is lost.** Before each expiry
-  sweep, payments past the window are looked up by reference (`reconcileStale`):
+  sweep, payments past the window are read again (`reconcileStale`): an order
+  by its id, a preference's payment by reference.
   - paid ones settle;
   - the rest expire.
 
   A charge that still lands on an expired payment settles, and settlement
   refunds it because the order is gone.
-- **Refund.** `POST /v1/payments/{id}/refunds` with the store's token,
-  idempotent per refund row.
+- **Refund.** With the store's token, idempotent per refund row. An order:
+  `POST /v1/orders/{id}/refund`, with no body for the whole of an untouched
+  charge, else the payment (`PAY…`) and amount. A preference's payment:
+  `POST /v1/payments/{id}/refunds`.
 - **A refund the store makes in its own Mercado Pago account.** The payment's
-  next webhook reads the charge back. Whatever was refunded beyond what EKORU
+  next webhook reads the charge back (an order's `refunded_amount`, a payment's
+  `transaction_amount_refunded`). Whatever was refunded beyond what EKORU
   accounted for is recorded as a completed refund: the order becomes refunded,
   and a full refund restocks (TRX-22).
-- **Chargebacks and claims.** A `charged_back` or `in_mediation` charge is
-  recorded once on the payment (`CHARGEBACK` / `MEDIATION`) and logged as an
-  error for support. The money is Mercado Pago's and the store's to settle.
+- **Chargebacks and claims.** A `charged_back` or `in_mediation` charge (for an
+  order, any entry in `transactions.chargebacks`) is recorded once on the
+  payment (`CHARGEBACK` / `MEDIATION`) and logged as an error for support. The
+  money is Mercado Pago's and the store's to settle.
 - **Tokens.** They last 180 days. A daily job renews those expiring within 30
   days. If Mercado Pago refuses a renewal, the connection pauses and the panel
   asks the store to reconnect.

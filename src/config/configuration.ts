@@ -107,6 +107,16 @@ export default () => ({
      * credentials of Mercado Pago test accounts (an "Integrador" owns the app).
      */
     testToken: process.env.MERCADOPAGO_TEST_TOKEN === 'true',
+    /**
+     * Which API new checkouts are created with (TRX-24): `orders` (`/v1/orders`)
+     * or, until each environment is switched, `preferences`
+     * (`/checkout/preferences`). Payments already created keep the API they
+     * were made with, whatever this says.
+     */
+    checkoutApi:
+      process.env.MERCADOPAGO_CHECKOUT_API === 'orders'
+        ? ('orders' as const)
+        : ('preferences' as const),
     /** Access tokens last 180 days; refresh the ones expiring within this window. */
     refreshWithinDays: parseInt(
       process.env.MERCADOPAGO_REFRESH_WITHIN_DAYS || '30',

@@ -43,6 +43,55 @@ export interface MercadoPagoRefund {
   status: string;
 }
 
+/** One payment inside an Orders API order (`transactions.payments[]`). Amounts are decimal strings. */
+export interface MercadoPagoOrderPayment {
+  /** `PAY01…` */
+  id?: string;
+  status?: string;
+  /** accredited, cc_rejected_…, … */
+  status_detail?: string;
+  amount?: string;
+  paid_amount?: string;
+  refunded_amount?: string;
+}
+
+/** A refund inside an Orders API order (`transactions.refunds[]`). */
+export interface MercadoPagoOrderRefund {
+  id?: string;
+  /** The `PAY01…` payment it gives back. */
+  transaction_id?: string;
+  amount?: string;
+  status?: string;
+}
+
+/**
+ * The fields of `/v1/orders/{id}` EKORU reads (TRX-24). Amounts are decimal
+ * strings. Status pairs Mercado Pago documents for Checkout Pro:
+ * created/created, processing/in_process, action_required/…,
+ * processed/accredited (paid), processed/partially_refunded,
+ * processed/refunded, refunded/refunded, failed/…, canceled/canceled (also
+ * an order that expired unpaid), expired/expired.
+ */
+export interface MercadoPagoOrder {
+  /** `ORD01…` */
+  id: string;
+  status?: string;
+  status_detail?: string;
+  external_reference?: string | null;
+  total_amount?: string;
+  total_paid_amount?: string;
+  marketplace_fee?: string;
+  /** The account the order belongs to (the store). */
+  user_id?: string | number;
+  /** Checkout Pro: where the buyer pays. Only on create. */
+  checkout_url?: string;
+  transactions?: {
+    payments?: MercadoPagoOrderPayment[];
+    refunds?: MercadoPagoOrderRefund[];
+    chargebacks?: { id?: string; status?: string }[];
+  };
+}
+
 /** A Mercado Pago API call answered with an error status. */
 export class MercadoPagoApiError extends Error {
   constructor(
@@ -75,9 +124,11 @@ const TIMEOUT_MS = 15_000;
 
 /**
  * Thin REST client for the Mercado Pago endpoints the marketplace uses. Plain
- * `fetch` rather than the SDK: five calls, no extra dependency, and each one
- * names the access token it acts with — a store's own token, obtained with
- * OAuth, for everything about its sales.
+ * `fetch` rather than the SDK: a handful of calls, no extra dependency, and
+ * each one names the access token it acts with — a store's own token,
+ * obtained with OAuth, for everything about its sales. Checkouts are created
+ * with the Orders API or, until it is switched over, the Preferences API
+ * (`MERCADOPAGO_CHECKOUT_API`, TRX-24).
  *
  * Reference: https://www.mercadopago.cl/developers/es/reference
  */
@@ -179,6 +230,68 @@ export class MercadoPagoApi {
     // An approved attempt wins over later rejected ones for the same checkout.
     return results.find((p) => p.status === 'approved') ?? results[0] ?? null;
   }
+
+  // ─── Orders API (TRX-24) ──────────────────────────────────────────────────
+
+  /** A Checkout Pro order; the buyer pays at its `checkout_url`. */
+  createOrder({
+    accessToken,
+    body,
+    idempotencyKey,
+  }: {
+    accessToken: string;
+    body: Record<string, unknown>;
+    idempotencyKey: string;
+  }): Promise<MercadoPagoOrder> {
+    return this.request<MercadoPagoOrder>('POST', '/v1/orders', {
+      accessToken,
+      body,
+      idempotencyKey,
+    });
+  }
+
+  getOrder({
+    accessToken,
+    orderId,
+  }: {
+    accessToken: string;
+    orderId: string;
+  }): Promise<MercadoPagoOrder> {
+    return this.request<MercadoPagoOrder>(
+      'GET',
+      `/v1/orders/${encodeURIComponent(orderId)}`,
+      { accessToken },
+    );
+  }
+
+  /**
+   * Gives an order's money back: all of it without `transactions`, else the
+   * listed amounts of the listed payments. Answers with the order, its
+   * refunds in `transactions.refunds`.
+   */
+  refundOrder({
+    accessToken,
+    orderId,
+    transactions,
+    idempotencyKey,
+  }: {
+    accessToken: string;
+    orderId: string;
+    transactions?: { id: string; amount: string }[];
+    idempotencyKey: string;
+  }): Promise<MercadoPagoOrder> {
+    return this.request<MercadoPagoOrder>(
+      'POST',
+      `/v1/orders/${encodeURIComponent(orderId)}/refund`,
+      {
+        accessToken,
+        ...(transactions ? { body: { transactions } } : {}),
+        idempotencyKey,
+      },
+    );
+  }
+
+  // ─── Refunds of Preferences checkouts ─────────────────────────────────────
 
   /** Full refund without `amount`; Mercado Pago splits it with the marketplace fee proportionally. */
   refund({

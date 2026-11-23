@@ -3,6 +3,9 @@ import { ConfigService } from '@nestjs/config';
 import { InternalServerError } from '../../common/exceptions/index.js';
 import {
   MercadoPagoApi,
+  MercadoPagoApiError,
+  type MercadoPagoOrder,
+  type MercadoPagoOrderPayment,
   type MercadoPagoPayment,
 } from '../mercadopago/mercadopago.api.js';
 import type {
@@ -26,7 +29,7 @@ export function paymentIdFromReference(reference: unknown): number | null {
   return match ? Number(match[1]) : null;
 }
 
-/** Mercado Pago payment status → the canonical one. */
+/** Mercado Pago payment status (Payments API) → the canonical one. */
 export function mapMercadoPagoStatus(
   status: string | undefined,
 ): ConfirmPaymentResult['status'] {
@@ -44,6 +47,93 @@ export function mapMercadoPagoStatus(
   }
 }
 
+/** Orders API order status → the canonical one (TRX-24). */
+export function mapMercadoPagoOrderStatus(
+  status: string | undefined,
+  detail: string | undefined,
+): ConfirmPaymentResult['status'] {
+  switch (status) {
+    case 'processed':
+      // processed/accredited is paid; processed/partially_refunded was paid
+      // first. processed/refunded, like `refunded` below, only follows a
+      // payment that already settled ours.
+      return detail === 'refunded' ? 'PROCESSING' : 'COMPLETED';
+    case 'failed':
+      return 'FAILED';
+    // Also an order that expired unpaid.
+    case 'canceled':
+    case 'cancelled':
+      return 'CANCELLED';
+    case 'expired':
+      return 'EXPIRED';
+    // created, processing, action_required; refunded and charged_back.
+    default:
+      return 'PROCESSING';
+  }
+}
+
+/**
+ * Whether a Payment's `externalId` is an Orders API order (`ORD01…`, TRX-24)
+ * rather than a preference (`<collector id>-<uuid>`). Each payment is read
+ * and refunded through the API it was created with.
+ */
+export function isMercadoPagoOrderId(
+  externalId: string | null | undefined,
+): externalId is string {
+  return typeof externalId === 'string' && /^ORD[0-9A-Z]+$/i.test(externalId);
+}
+
+/** An amount as the decimal string the Orders API takes; CLP has no cents. */
+export function mercadoPagoAmount(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+/** A decimal string from the Orders API as a number; 0 when absent. */
+const amountOf = (value: string | undefined): number => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+};
+
+/** Refund statuses that mean the money is not going back. */
+const REFUND_FAILED = new Set(['failed', 'rejected', 'canceled', 'cancelled']);
+
+/** The order's payment that went through, else its latest attempt. */
+function paidPayment(
+  order: MercadoPagoOrder,
+): MercadoPagoOrderPayment | undefined {
+  const payments = order.transactions?.payments ?? [];
+  return (
+    payments.find(
+      (p) =>
+        p.status_detail === 'accredited' ||
+        p.status === 'processed' ||
+        p.status === 'approved',
+    ) ?? payments[payments.length - 1]
+  );
+}
+
+/** What has been given back on an order so far. */
+function refundedOn(order: MercadoPagoOrder): number {
+  const payments = order.transactions?.payments ?? [];
+  if (payments.some((p) => p.refunded_amount != null)) {
+    return payments.reduce((sum, p) => sum + amountOf(p.refunded_amount), 0);
+  }
+  return (order.transactions?.refunds ?? [])
+    .filter((r) => !REFUND_FAILED.has(r.status ?? ''))
+    .reduce((sum, r) => sum + amountOf(r.amount), 0);
+}
+
+/** Adds our payment id to a return URL, so the return finds it without Mercado Pago's help. */
+function withPaymentHint(url: string, paymentId: number): string {
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set('ekoru_payment', String(paymentId));
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 /** Never a real payment id: what the return carries when the buyer left without paying. */
 const NO_PAYMENT = new Set(['', 'null', 'undefined']);
 
@@ -57,9 +147,16 @@ const NO_PAYMENT = new Set(['', 'null', 'undefined']);
  * EKORU's account at source. Payments to EKORU itself (memberships) use
  * EKORU's own access token the same way, with no fee.
  *
- * Nothing a browser or a webhook says is taken at face value: the status is
- * always read back from `/v1/payments` and must carry this payment's
- * `external_reference` and amount.
+ * New checkouts are Orders API orders (`/v1/orders`) when
+ * `MERCADOPAGO_CHECKOUT_API=orders`, else preferences (TRX-24). A payment is
+ * then always read and refunded through the API it was created with, told
+ * apart by its `externalId` (`isMercadoPagoOrderId`), so switching the
+ * setting never strands a payment made before.
+ *
+ * Nothing a browser or a webhook says is taken at face value: an order is
+ * read back by the id stored when it was created, a preference's payment from
+ * `/v1/payments`, and either must carry this payment's `external_reference`
+ * and amount.
  */
 @Injectable()
 export class MercadoPagoAdapter implements ProviderAdapter {
@@ -73,15 +170,17 @@ export class MercadoPagoAdapter implements ProviderAdapter {
   async initiate(args: InitiatePaymentArgs): Promise<InitiatePaymentResult> {
     const accessToken = this.token(args.config);
     const fee = Math.max(0, Math.round(args.platformFee ?? 0));
-    // The preference stops accepting payments a little before the expiry
+    // The checkout stops accepting payments a little before the expiry
     // sweep gives up on the Payment, so nobody pays for an expired order.
     const windowMin = this.config.get<number>(
       'payments.expireAfterMinutes',
       60,
     );
-    const expiresAt = new Date(
-      Date.now() + Math.max(10, windowMin - 5) * 60_000,
-    );
+    const payableMinutes = Math.max(10, windowMin - 5);
+
+    if (this.config.get<string>('mercadoPago.checkoutApi') === 'orders') {
+      return this.createOrder(args, { accessToken, fee, payableMinutes });
+    }
 
     const preference = await this.api.createPreference({
       accessToken,
@@ -103,7 +202,9 @@ export class MercadoPagoAdapter implements ProviderAdapter {
         // paid or not when the buyer comes back.
         binary_mode: true,
         expires: true,
-        expiration_date_to: expiresAt.toISOString(),
+        expiration_date_to: new Date(
+          Date.now() + payableMinutes * 60_000,
+        ).toISOString(),
         // Mercado Pago appends collection_id, status, external_reference,
         // preference_id… to each URL.
         back_urls: {
@@ -125,11 +226,13 @@ export class MercadoPagoAdapter implements ProviderAdapter {
   }
 
   /**
-   * The buyer is back from Checkout Pro. The query names the Mercado Pago
-   * payment (`payment_id` / `collection_id`); when it does not (the buyer
-   * left without paying), the payment is looked up by our reference.
+   * The buyer is back from Checkout Pro. An order is read by its stored id,
+   * whatever the query says. For a preference the query names the Mercado
+   * Pago payment (`payment_id` / `collection_id`); when it does not (the
+   * buyer left without paying), the payment is looked up by our reference.
    */
   async confirm(args: ConfirmPaymentArgs): Promise<ConfirmPaymentResult> {
+    if (isMercadoPagoOrderId(args.externalId)) return this.readOrder(args);
     const value =
       args.rawPayload['payment_id'] ?? args.rawPayload['collection_id'];
     const named =
@@ -140,10 +243,11 @@ export class MercadoPagoAdapter implements ProviderAdapter {
     return this.resolve({ ...args, providerPaymentId: named });
   }
 
-  /** What became of this payment at Mercado Pago, found by its reference. */
+  /** What became of this payment at Mercado Pago: its order, or the newest payment with its reference. */
   async lookup(
     args: Omit<ConfirmPaymentArgs, 'rawPayload' | 'externalToken'>,
   ): Promise<ConfirmPaymentResult> {
+    if (isMercadoPagoOrderId(args.externalId)) return this.readOrder(args);
     const found = await this.api.findPaymentByReference({
       accessToken: this.token(args.config),
       externalReference: mercadoPagoReference(args.paymentId),
@@ -157,12 +261,17 @@ export class MercadoPagoAdapter implements ProviderAdapter {
     return this.fromProviderPayment(found, args);
   }
 
-  /** Reads one Mercado Pago payment (from a return or a webhook) and checks it is this one. */
+  /**
+   * Reads what a return or a webhook pointed at and checks it is this
+   * payment's. An order is read by the id we stored, not by what the
+   * notification named.
+   */
   async resolve(
     args: Omit<ConfirmPaymentArgs, 'rawPayload' | 'externalToken'> & {
       providerPaymentId: string;
     },
   ): Promise<ConfirmPaymentResult> {
+    if (isMercadoPagoOrderId(args.externalId)) return this.readOrder(args);
     const payment = await this.api.getPayment({
       accessToken: this.token(args.config),
       paymentId: args.providerPaymentId,
@@ -170,7 +279,10 @@ export class MercadoPagoAdapter implements ProviderAdapter {
     return this.fromProviderPayment(payment, args);
   }
 
-  /** Which of our payments a Mercado Pago payment belongs to, from its reference. */
+  /**
+   * Which of our payments a Mercado Pago payment belongs to, from its
+   * reference. One this store's token cannot find (404) is not ours.
+   */
   async identify({
     providerPaymentId,
     config,
@@ -178,22 +290,35 @@ export class MercadoPagoAdapter implements ProviderAdapter {
     providerPaymentId: string;
     config: InitiatePaymentArgs['config'];
   }): Promise<number | null> {
-    const payment = await this.api.getPayment({
-      accessToken: this.token(config),
-      paymentId: providerPaymentId,
-    });
-    return paymentIdFromReference(payment.external_reference);
+    try {
+      const payment = await this.api.getPayment({
+        accessToken: this.token(config),
+        paymentId: providerPaymentId,
+      });
+      return paymentIdFromReference(payment.external_reference);
+    } catch (error) {
+      // Anything else may pass: the webhook answers 500 and comes back.
+      if (error instanceof MercadoPagoApiError && error.status === 404) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   /**
    * A paid charge as Mercado Pago sees it now, for what can happen after the
-   * payment (TRX-22): refunds made from the store's account, disputes.
+   * payment (TRX-22): refunds made from the store's account, disputes. An
+   * order is read by its id (`externalId`); a preference's charge by its
+   * payment id. `status` keeps the Payments API's words (`charged_back`,
+   * `in_mediation`) for both.
    */
   async inspect({
     providerPaymentId,
+    externalId,
     config,
   }: {
     providerPaymentId: string;
+    externalId?: string | null;
     config: InitiatePaymentArgs['config'];
   }): Promise<{
     paymentId: number | null;
@@ -201,6 +326,23 @@ export class MercadoPagoAdapter implements ProviderAdapter {
     refunded: number;
     raw: Record<string, unknown>;
   }> {
+    if (isMercadoPagoOrderId(externalId)) {
+      const order = await this.api.getOrder({
+        accessToken: this.token(config),
+        orderId: externalId,
+      });
+      const status = order.transactions?.chargebacks?.length
+        ? 'charged_back'
+        : /mediation/.test(order.status_detail ?? '')
+          ? 'in_mediation'
+          : (order.status ?? 'unknown');
+      return {
+        paymentId: paymentIdFromReference(order.external_reference),
+        status,
+        refunded: refundedOn(order),
+        raw: this.orderRaw(order),
+      };
+    }
     const payment = await this.api.getPayment({
       accessToken: this.token(config),
       paymentId: providerPaymentId,
@@ -221,6 +363,9 @@ export class MercadoPagoAdapter implements ProviderAdapter {
 
   /** Refunds (all or part of) a charge; Mercado Pago returns EKORU's fee share proportionally. */
   async refund(args: RefundArgs): Promise<RefundResult> {
+    if (isMercadoPagoOrderId(args.externalId)) {
+      return this.refundOrder({ ...args, externalId: args.externalId });
+    }
     if (!args.externalToken) {
       return {
         ok: false,
@@ -235,7 +380,7 @@ export class MercadoPagoAdapter implements ProviderAdapter {
       accessToken: this.token(args.config),
       paymentId: args.externalToken,
       amount: args.amount,
-      idempotencyKey: `ekoru-refund-${args.refundId ?? `${args.paymentId}-${args.amount}`}`,
+      idempotencyKey: this.refundKey(args),
     });
     return {
       // in_process: Mercado Pago accepted it and is moving the money.
@@ -255,6 +400,193 @@ export class MercadoPagoAdapter implements ProviderAdapter {
       status: 'PROCESSING',
       raw: { note: 'mercadopago_resolved_by_api' },
     });
+  }
+
+  // ─── Orders API (TRX-24) ──────────────────────────────────────────────────
+
+  private async createOrder(
+    args: InitiatePaymentArgs,
+    {
+      accessToken,
+      fee,
+      payableMinutes,
+    }: { accessToken: string; fee: number; payableMinutes: number },
+  ): Promise<InitiatePaymentResult> {
+    const amount = mercadoPagoAmount(args.amount);
+    // Mercado Pago's return should carry our external_reference; the hint
+    // finds the payment even if it does not.
+    const returnUrl = withPaymentHint(args.returnUrl, args.paymentId);
+    const order = await this.api.createOrder({
+      accessToken,
+      idempotencyKey: `ekoru-order-${args.paymentId}`,
+      body: {
+        type: 'online',
+        // Checkout Pro's page takes the payment: `manual` is the only mode
+        // it accepts.
+        processing_mode: 'manual',
+        // Approved or rejected at once, never pending (the preference's
+        // `binary_mode`): an order is either paid or not when the buyer
+        // comes back.
+        capture_mode: 'automatic',
+        external_reference: mercadoPagoReference(args.paymentId),
+        total_amount: amount,
+        description: args.description.slice(0, 100),
+        ...(fee > 0 ? { marketplace_fee: mercadoPagoAmount(fee) } : {}),
+        expiration_time: `PT${payableMinutes}M`,
+        items: [
+          {
+            title: args.description.slice(0, 100),
+            unit_price: amount,
+            quantity: 1,
+            external_code: String(args.orderId || args.paymentId),
+          },
+        ],
+        config: {
+          online: {
+            success_url: returnUrl,
+            failure_url: returnUrl,
+            pending_url: returnUrl,
+            auto_return: 'approved',
+          },
+        },
+      },
+    });
+    // Every later read and refund keys on the order id's shape.
+    if (!isMercadoPagoOrderId(order.id) || !order.checkout_url) {
+      this.logger.error(
+        `Mercado Pago order for payment ${args.paymentId} came back without an order id or checkout_url (id: ${String(order.id)})`,
+      );
+      throw new InternalServerError(
+        'Mercado Pago no devolvió el enlace de pago',
+      );
+    }
+    return {
+      externalId: order.id,
+      externalToken: null,
+      redirect: { kind: 'EXTERNAL', url: order.checkout_url },
+    };
+  }
+
+  private async readOrder(args: {
+    paymentId: number;
+    amount: number;
+    externalId: string;
+    config: InitiatePaymentArgs['config'];
+  }): Promise<ConfirmPaymentResult> {
+    const order = await this.api.getOrder({
+      accessToken: this.token(args.config),
+      orderId: args.externalId,
+    });
+    return this.fromOrder(order, args);
+  }
+
+  /**
+   * Gives back an order's money. The whole of an untouched charge is
+   * Mercado Pago's full refund; anything else names the payment and amount.
+   */
+  private async refundOrder(
+    args: RefundArgs & { externalId: string },
+  ): Promise<RefundResult> {
+    const accessToken = this.token(args.config);
+    const order = await this.api.getOrder({
+      accessToken,
+      orderId: args.externalId,
+    });
+    const paid = paidPayment(order);
+    if (!paid?.id) {
+      return {
+        ok: false,
+        externalRefundId: null,
+        raw: {
+          reason: 'mercadopago_order_not_paid',
+          paymentId: args.paymentId,
+          ...this.orderRaw(order),
+        },
+      };
+    }
+    const charged = amountOf(paid.amount ?? order.total_amount);
+    const full =
+      amountOf(paid.refunded_amount) === 0 &&
+      Math.round(args.amount) >= Math.round(charged);
+    const result = await this.api.refundOrder({
+      accessToken,
+      orderId: args.externalId,
+      ...(full
+        ? {}
+        : {
+            transactions: [
+              { id: paid.id, amount: mercadoPagoAmount(args.amount) },
+            ],
+          }),
+      idempotencyKey: this.refundKey(args),
+    });
+    const refunds = (result.transactions?.refunds ?? []).filter(
+      (r) => !r.transaction_id || r.transaction_id === paid.id,
+    );
+    const refund = refunds[refunds.length - 1];
+    return {
+      // A 2xx means Mercado Pago took it; only a refund it reports as
+      // failed is not going back.
+      ok: !refund || !REFUND_FAILED.has(refund.status ?? ''),
+      externalRefundId: refund?.id ?? null,
+      raw: { ...this.orderRaw(result), refund: refund ?? null },
+    };
+  }
+
+  private fromOrder(
+    order: MercadoPagoOrder,
+    expected: { paymentId: number; amount: number },
+  ): ConfirmPaymentResult {
+    const raw = this.orderRaw(order);
+    if (
+      paymentIdFromReference(order.external_reference) !== expected.paymentId
+    ) {
+      this.logger.warn(
+        `Mercado Pago order ${order.id} does not belong to payment ${expected.paymentId}`,
+      );
+      return {
+        status: 'PROCESSING',
+        raw: { ...raw, reason: 'reference_mismatch' },
+      };
+    }
+    const status = mapMercadoPagoOrderStatus(order.status, order.status_detail);
+    const paid = paidPayment(order);
+    const ids = paid?.id ? { providerPaymentId: paid.id } : {};
+    // What the order asks for; the buyer's installment interest may make
+    // the paid amount larger.
+    const charged = amountOf(order.total_amount ?? paid?.amount);
+    if (
+      status === 'COMPLETED' &&
+      Math.round(charged) !== Math.round(expected.amount)
+    ) {
+      this.logger.error(
+        `Mercado Pago order ${order.id} charged ${charged}, payment ${expected.paymentId} expected ${expected.amount}`,
+      );
+      return {
+        status: 'FAILED',
+        raw: { ...raw, error: 'El monto cobrado no coincide con la orden' },
+        ...ids,
+      };
+    }
+    return { status, raw, ...ids };
+  }
+
+  /** What is kept of an order for the audit trail. */
+  private orderRaw(order: MercadoPagoOrder): Record<string, unknown> {
+    const paid = paidPayment(order);
+    return {
+      order_id: order.id,
+      status: order.status ?? null,
+      status_detail: order.status_detail ?? null,
+      external_reference: order.external_reference ?? null,
+      total_amount: order.total_amount ?? null,
+      total_paid_amount: order.total_paid_amount ?? null,
+      marketplace_fee: order.marketplace_fee ?? null,
+      payment_id: paid?.id ?? null,
+      payment_status: paid?.status ?? null,
+      payment_status_detail: paid?.status_detail ?? null,
+      refunded: refundedOn(order),
+    };
   }
 
   // ─── helpers ──────────────────────────────────────────────────────────────
@@ -300,6 +632,11 @@ export class MercadoPagoAdapter implements ProviderAdapter {
     return { status, raw, providerPaymentId: String(payment.id) };
   }
 
+  /** Makes a retried refund call idempotent: one key per refund row. */
+  private refundKey(args: RefundArgs): string {
+    return `ekoru-refund-${args.refundId ?? `${args.paymentId}-${args.amount}`}`;
+  }
+
   private token(config: InitiatePaymentArgs['config']): string {
     if (!config.secretKey) {
       throw new InternalServerError(
@@ -310,9 +647,10 @@ export class MercadoPagoAdapter implements ProviderAdapter {
   }
 
   /**
-   * Where Mercado Pago posts the webhook. `ekoru_payment` is only a hint for
-   * finding the store's token; the payment read back with it must still
-   * carry our reference.
+   * Where Mercado Pago posts a preference's webhook. `ekoru_payment` is only
+   * a hint for finding the store's token; the payment read back with it must
+   * still carry our reference. Orders notify the URL set in the
+   * application's Webhooks screen (topic "Order (Mercado Pago)").
    */
   private notificationUrl(paymentId: number): string {
     const base = this.config.get<string>('gatewayBaseUrl');

@@ -409,6 +409,37 @@ describe('PaymentsService', () => {
       expect(result).toEqual({ paymentId: 77, status: 'COMPLETED' });
     });
 
+    it('finds an Orders checkout by the id it put in the return URL (TRX-24)', async () => {
+      const { service, prisma, adapter } = make();
+      prisma.payment.findFirst.mockResolvedValue({
+        ...payment,
+        externalId: 'ORD01JQ4S4KY8HWQ6NA5PXB65B3D3',
+        status: 'PROCESSING',
+      });
+      prisma.chileanPaymentConfig.findUnique.mockResolvedValue({
+        environment: 'PRODUCTION',
+        secretKey: 'APP_USR-store',
+      });
+      adapter.confirm.mockResolvedValue({ status: 'PROCESSING', raw: {} });
+
+      await service.handleProviderReturn({
+        provider: ChileanPaymentProvider.MERCADOPAGO,
+        rawPayload: { ekoru_payment: '77', status: 'null' },
+      });
+
+      expect(prisma.payment.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 77, paymentProvider: 'MERCADOPAGO' },
+        }),
+      );
+      expect(adapter.confirm).toHaveBeenCalledWith(
+        expect.objectContaining({
+          paymentId: 77,
+          externalId: 'ORD01JQ4S4KY8HWQ6NA5PXB65B3D3',
+        }),
+      );
+    });
+
     it('leaves an expired payment expired when the buyer did not pay', async () => {
       const { service, prisma, adapter } = make();
       prisma.payment.findFirst.mockResolvedValue({
@@ -752,6 +783,96 @@ describe('PaymentsService', () => {
       await deliver(service);
 
       expect(settlement.recordExternalRefund).not.toHaveBeenCalled();
+    });
+
+    describe('order notifications (TRX-24)', () => {
+      const ORDER_ID = 'ORD01JQ4S4KY8HWQ6NA5PXB65B3D3';
+      const orderPayment = { ...payment, externalId: ORDER_ID };
+      const orderBody = {
+        type: 'order',
+        action: 'order.processed',
+        data: { id: ORDER_ID, status: 'processed' },
+      };
+      const deliverOrder = (service: PaymentsService) =>
+        deliver(
+          service,
+          // Mercado Pago signs an alphanumeric data.id in lower case.
+          mpSignature(ORDER_ID.toLowerCase(), 'req-1'),
+          orderBody,
+          { 'data.id': ORDER_ID, type: 'order' },
+        );
+
+      it("finds the payment by its order and reads it back with the store's token", async () => {
+        const { service, prisma, mercadoPago, settlement } = make();
+        prisma.payment.findFirst.mockResolvedValue(orderPayment);
+        prisma.chileanPaymentConfig.findUnique.mockResolvedValue(storeConfig);
+        mercadoPago.resolve.mockResolvedValue({
+          status: 'COMPLETED',
+          raw: {},
+          providerPaymentId: 'PAY01',
+        });
+
+        const result = await deliverOrder(service);
+
+        expect(prisma.payment.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: {
+              externalId: { in: [ORDER_ID, ORDER_ID] },
+              paymentProvider: 'MERCADOPAGO',
+            },
+          }),
+        );
+        expect(mercadoPago.identify).not.toHaveBeenCalled();
+        expect(mercadoPago.resolve).toHaveBeenCalledWith(
+          expect.objectContaining({
+            paymentId: 77,
+            externalId: ORDER_ID,
+            config: expect.objectContaining({ secretKey: 'APP_USR-store' }),
+          }),
+        );
+        expect(settlement.onCompleted).toHaveBeenCalledWith(77);
+        expect(result).toEqual({ paymentId: 77, status: 'COMPLETED' });
+      });
+
+      it('leaves an order that is not ours alone', async () => {
+        const { service, prisma, mercadoPago } = make();
+        prisma.payment.findFirst.mockResolvedValue(null);
+
+        await deliverOrder(service);
+
+        expect(mercadoPago.resolve).not.toHaveBeenCalled();
+        expect(prisma.paymentWebhook.update).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              processingError: 'Not an EKORU payment',
+            }),
+          }),
+        );
+      });
+
+      it('reads a paid order again for refunds and disputes (TRX-22)', async () => {
+        const { service, prisma, mercadoPago, settlement } = make();
+        prisma.payment.findFirst.mockResolvedValue({
+          ...orderPayment,
+          status: 'COMPLETED',
+        });
+        prisma.chileanPaymentConfig.findUnique.mockResolvedValue(storeConfig);
+        mercadoPago.inspect.mockResolvedValue({
+          paymentId: 77,
+          status: 'processed',
+          refunded: 5000,
+          raw: {},
+        });
+
+        await deliverOrder(service);
+
+        expect(mercadoPago.inspect).toHaveBeenCalledWith(
+          expect.objectContaining({ externalId: ORDER_ID }),
+        );
+        expect(settlement.recordExternalRefund).toHaveBeenCalledWith(
+          expect.objectContaining({ paymentId: 77, refundedTotal: 5000 }),
+        );
+      });
     });
 
     it('pauses the store connection when it unlinks EKORU', async () => {

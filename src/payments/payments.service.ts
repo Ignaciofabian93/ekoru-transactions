@@ -942,10 +942,13 @@ export class PaymentsService {
    * A Mercado Pago webhook (TRX-16). It only names a resource, so:
    *   1. the `x-signature` must verify with EKORU's application secret, or
    *      nothing happens: no lookup and no row, only a log line (TRX-25);
-   *   2. the store's token is found from our `ekoru_payment` hint, or from
-   *      the account id Mercado Pago sends (`user_id`);
-   *   3. the payment is read back from Mercado Pago, and its reference must
-   *      be ours, before the status is applied.
+   *   2. the payment is found: an `order` notification names the order id
+   *      stored when the checkout was created (TRX-24); a `payment` one comes
+   *      with our `ekoru_payment` hint, or the store is found from the
+   *      account id Mercado Pago sends (`user_id`) and the payment from the
+   *      charge's reference;
+   *   3. the payment is read back from Mercado Pago with the store's token,
+   *      and its reference must be ours, before the status is applied.
    * A forged or replayed notification can at most make us re-read a payment.
    * `mp-connect` notifications tell us a store unlinked EKORU.
    */
@@ -1022,12 +1025,27 @@ export class PaymentsService {
       await done({});
       return {};
     }
-    if (type !== 'payment' || !resourceId) {
+    if ((type !== 'payment' && type !== 'order') || !resourceId) {
       await done({});
       return {};
     }
 
-    // The store's connection: the hinted payment's, else the account's.
+    // An order we created is stored under its id (TRX-24); any other is not ours.
+    if (type === 'order' && !payment) {
+      payment = await this.prisma.payment.findFirst({
+        where: {
+          externalId: { in: [resourceId, resourceId.toUpperCase()] },
+          paymentProvider: provider,
+        },
+        select: RETURN_SELECT,
+      });
+      if (!payment) {
+        await done({ processingError: 'Not an EKORU payment' });
+        return {};
+      }
+    }
+
+    // The store's connection: the payment's, else the account's.
     let config = payment
       ? await this.prisma.chileanPaymentConfig.findUnique({
           where: { id: payment.chileanConfigId },
@@ -1075,6 +1093,7 @@ export class PaymentsService {
         await this._followPaidCharge({
           paymentId: payment.id,
           providerPaymentId: resourceId,
+          externalId: payment.externalId,
           config,
         });
       }
@@ -1106,10 +1125,13 @@ export class PaymentsService {
   private async _followPaidCharge({
     paymentId,
     providerPaymentId,
+    externalId,
     config,
   }: {
     paymentId: number;
     providerPaymentId: string;
+    /** An order is read by its own id, whatever the notification named (TRX-24). */
+    externalId: string | null;
     config: {
       environment: 'SANDBOX' | 'PRODUCTION';
       merchantId: string | null;
@@ -1119,6 +1141,7 @@ export class PaymentsService {
   }): Promise<void> {
     const charge = await this.mercadoPago.inspect({
       providerPaymentId,
+      externalId,
       config: this.secrets.credentials(config),
     });
     if (charge.paymentId !== paymentId) return;
@@ -1323,9 +1346,11 @@ export class PaymentsService {
    * stored as `externalToken`, so we look up by token there. Its abort/timeout
    * returns instead carry `TBK_ORDEN_COMPRA` (our `externalId`) with no usable
    * token. Mercado Pago's return carries our `external_reference`
-   * (`ekoru-pay-<id>`) and the `preference_id` we stored as `externalId`.
-   * The adapter then checks the payment it names really carries that
-   * reference, so a tampered query cannot settle someone else's payment.
+   * (`ekoru-pay-<id>`) and, for a preference, the `preference_id` we stored
+   * as `externalId`; an Orders checkout also puts our id in the return URL
+   * as `ekoru_payment` (TRX-24). The adapter then reads the charge back and
+   * checks it carries that payment's reference, so a tampered query cannot
+   * settle someone else's payment.
    *
    * Looking up by token first also avoids a `findFirst({ externalId: undefined })`
    * that would otherwise silently match the first Webpay row in the table.
@@ -1348,7 +1373,10 @@ export class PaymentsService {
     }
 
     if (provider === ChileanPaymentProvider.MERCADOPAGO) {
-      const id = paymentIdFromReference(payload['external_reference']);
+      const hint = Number(str(payload['ekoru_payment']));
+      const id =
+        paymentIdFromReference(payload['external_reference']) ??
+        (Number.isInteger(hint) && hint > 0 ? hint : null);
       if (id) {
         const byReference = await this.prisma.payment.findFirst({
           where: { id, paymentProvider: provider },
