@@ -159,6 +159,11 @@ sign-up. Fill the row in like this:
     notification URL, or else from the account's `user_id`, and the payment
     from the charge's reference. A payment that turns out to be an order is
     read as an order.
+  - Only a paid outcome changes the EKORU order. A rejected, canceled or
+    expired attempt ends that payment and leaves the order open: an Orders API
+    order that expires unpaid reads `canceled`, and the buyer may already be
+    paying a newer attempt from "Pagar" in Mis pedidos. The expiry sweep closes
+    the order an hour after its latest attempt.
 - **The buyer never returns and the webhook is lost.** Before each expiry
   sweep, payments past the window are read again (`reconcileStale`): an order
   by its id, a preference's payment by reference.

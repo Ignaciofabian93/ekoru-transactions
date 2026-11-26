@@ -692,6 +692,28 @@ describe('PaymentsService', () => {
       expect(settlement.onCompleted).toHaveBeenCalledWith(77);
     });
 
+    it.each(['CANCELLED', 'EXPIRED'] as const)(
+      'keeps the order open when an attempt ends %s, so a newer attempt can still pay it',
+      async (status) => {
+        const { service, prisma, mercadoPago, orders } = make();
+        prisma.payment.findFirst.mockResolvedValue(payment);
+        prisma.chileanPaymentConfig.findUnique.mockResolvedValue(storeConfig);
+        // An Orders API order that expired unpaid reads canceled/canceled.
+        mercadoPago.resolve.mockResolvedValue({ status, raw: {} });
+
+        const result = await deliver(service);
+
+        expect(result).toEqual({ paymentId: 77, status });
+        expect(prisma.payment.update).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { id: 77 },
+            data: expect.objectContaining({ status }),
+          }),
+        );
+        expect(orders.markCanceled).not.toHaveBeenCalled();
+      },
+    );
+
     it('settles a charge that lands on an expired payment, so settlement can refund it', async () => {
       const { service, prisma, mercadoPago, settlement } = make();
       prisma.payment.findFirst.mockResolvedValue({

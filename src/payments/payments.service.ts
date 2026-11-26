@@ -773,11 +773,12 @@ export class PaymentsService {
       result.raw,
       result.providerPaymentId,
       {
-        // A rejected Mercado Pago attempt leaves the order open for a retry on
-        // the same checkout; the expiry sweep closes it if none succeeds.
-        keepOrderOpen:
-          provider === ChileanPaymentProvider.MERCADOPAGO &&
-          result.status === 'FAILED',
+        // No Mercado Pago outcome but a payment closes the order: the expiry
+        // sweep does, an hour after the latest attempt. A rejected card can be
+        // retried on the same checkout, and an attempt that expires unpaid
+        // (`canceled` on the Orders API) may already have a newer one from
+        // "Pagar" in Mis pedidos that can still be paid.
+        keepOrderOpen: provider === ChileanPaymentProvider.MERCADOPAGO,
       },
     );
 
